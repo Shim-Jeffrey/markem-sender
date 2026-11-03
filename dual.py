@@ -95,7 +95,7 @@ class Approval:
 
 
 class DualEntry:
-    def __init__(self, clock=time.time, max_tries=MAX_TRIES, expire=EXPIRE_SECONDS):
+    def __init__(self, clock=time.monotonic, max_tries=MAX_TRIES, expire=EXPIRE_SECONDS):
         self._clock, self.max_tries, self.expire = clock, max_tries, expire
         self._p = None
 

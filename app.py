@@ -123,7 +123,7 @@ class App(tk.Tk):
         p = self.dual.discard()
         if p:
             try:
-                self.store.log_work("work_fail", p["worker"], None, job=p["request"].job,
+                self.store.log_work_safe("work_fail", p["worker"], None, job=p["request"].job,
                                     kind=dual.KIND_LABEL[p["request"].kind],
                                     reason="1차 입력 만료(%d분 안에 2차 확인 없음)" % (dual.EXPIRE_SECONDS // 60))
             except store.AuthError:
@@ -571,12 +571,12 @@ class TtoPage(tk.Frame):
         old = app.dual.submit(app.user, req)
         if old:   # 이전 요청이 확인 없이 새 요청으로 바뀐 경우
             try:
-                app.store.log_work("work_fail", old["worker"], None, job=old["request"].job,
+                app.store.log_work_safe("work_fail", old["worker"], None, job=old["request"].job,
                                    kind=dual.KIND_LABEL[old["request"].kind],
                                    reason="2차 확인 전에 1차가 새 요청을 입력해 폐기")
             except store.AuthError:
                 pass
-        app.store.log_work("work_request", app.user, job=req.job, kind=dual.KIND_LABEL[kind])
+        app.store.log_work_safe("work_request", app.user, job=req.job, kind=dual.KIND_LABEL[kind])
         messagebox.showinfo("1차 입력 완료", "입력을 접수했습니다.\n2차 관리자가 로그인해 같은 내용을 "
                                         "입력하면 전송됩니다 (10분 이내).")
         app.logout("1차 입력이 접수되었습니다. 2차 관리자가 로그인해 같은 내용을 입력하세요 (10분 이내)")

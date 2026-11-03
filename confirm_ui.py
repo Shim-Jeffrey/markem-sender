@@ -124,6 +124,16 @@ class ManagerEntryFrame(tk.Frame):
             self.msg.configure(text="장비에 연결되어 있지 않습니다. 취소하고 작업자가 연결을 확인하세요.")
             return
         pending = d._p                       # 기록용(1차 정보)
+        if not app.store.user_usable(pending["worker"].id, "worker"):
+            # 승인 대기 중 1차 작업자 계정이 삭제·비활성·잠금 되었다
+            pw = pending["worker"]
+            d.discard()
+            app.store.log_work_safe("work_fail", pw, app.user, job=pending["request"].job,
+                                    kind=dual.KIND_LABEL[pending["request"].kind],
+                                    reason="1차 작업자 계정을 더 이상 쓸 수 없어 폐기")
+            messagebox.showwarning("확인 불가", "1차 작업자 계정을 더 이상 쓸 수 없어 요청이 폐기되었습니다.")
+            app.logout("1차 요청이 폐기되었습니다. 1차 작업자부터 다시 입력하세요")
+            return
         try:
             req = dual.Request(d.pending_kind(), self.job.get(), self.alloc.get(),
                                [tuple(self.tree.item(i, "values")) for i in self.tree.get_children()],
@@ -141,14 +151,14 @@ class ManagerEntryFrame(tk.Frame):
         kind = dual.KIND_LABEL[pending["request"].kind]
 
         if res.status == "retry":
-            app.store.log_work("work_retry", w, m, job=job, kind=kind, tries=res.tries,
+            app.store.log_work_safe("work_retry", w, m, job=job, kind=kind, tries=res.tries,
                                fields=res.fields)
             self.msg.configure(text="입력이 일치하지 않습니다 (%d/%d회). 다시 입력하세요 — 남은 기회 %d회"
                                     % (res.tries, dual.MAX_TRIES, res.left))
             self._clear_inputs()
             self.job.focus_set()
         elif res.status == "reset":
-            app.store.log_work("work_fail", w, m, job=job, kind=kind, data=data, tries=res.tries,
+            app.store.log_work_safe("work_fail", w, m, job=job, kind=kind, data=data, tries=res.tries,
                                fields=res.fields,
                                reason="2차 입력 %d회 불일치 — 1차 입력 폐기, 1차부터 다시" % res.tries)
             messagebox.showwarning("입력 불일치",
@@ -157,7 +167,7 @@ class ManagerEntryFrame(tk.Frame):
             app.logout("2차 입력 %d회 불일치로 1차 입력이 폐기되었습니다. 1차 작업자부터 다시 입력하세요"
                        % res.tries)
         elif res.status == "expired":
-            app.store.log_work("work_fail", w, m, job=job, kind=kind, reason="1차 입력 만료(10분)")
+            app.store.log_work_safe("work_fail", w, m, job=job, kind=kind, reason="1차 입력 만료(10분)")
             messagebox.showwarning("시간 초과", "1차 입력이 만료되었습니다. 1차 작업자부터 다시 입력하세요.")
             app.logout("1차 입력이 만료되었습니다. 1차 작업자부터 다시 입력하세요")
         else:
@@ -177,13 +187,13 @@ class ManagerEntryFrame(tk.Frame):
         def done(r):
             ok, why = r
             if ok:
-                app.store.log_work("work_ok", w, m, job=job, kind=kind, data=data,
+                app.store.log_work_safe("work_ok", w, m, job=job, kind=kind, data=data,
                                    tries=mismatches or "")
                 messagebox.showinfo("전송 완료", "작업 성공\n1차 %s · 2차 %s" % (w.display_name,
                                                                          m.display_name))
                 app.logout("작업 성공: %s (1차 %s / 2차 %s)" % (kind, w.display_name, m.display_name))
             else:
-                app.store.log_work("work_fail", w, m, job=job, kind=kind, data=data,
+                app.store.log_work_safe("work_fail", w, m, job=job, kind=kind, data=data,
                                    tries=mismatches or "", reason=why)
                 messagebox.showerror("전송 실패", "작업 실패\n%s\n\n1차 작업자부터 다시 입력해야 합니다." % why)
                 app.logout("작업 실패: %s" % why)

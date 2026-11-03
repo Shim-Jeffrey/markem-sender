@@ -118,6 +118,12 @@ class FakeClient:
     status_on = True
 
 
+class ClockTest(unittest.TestCase):
+    def test_default_clock_is_monotonic(self):
+        import time
+        self.assertIs(D.DualEntry()._clock, time.monotonic)
+
+
 class RunTest(unittest.TestCase):
     def approval(self, kind="update"):
         d = D.DualEntry()

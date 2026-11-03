@@ -304,6 +304,39 @@ class MasterAndWorkLogTest(unittest.TestCase):
         self.assertIn("작업명=JOB-A", txt)
         self.assertIn("데이터=LOT=L1", txt)
 
+    def test_customer_master_cannot_manage_tasco_org_workers(self):
+        self.s.create_user(self.t, "tw1", "타스코작업자", "worker", "Temp12345")
+        ids = self.ids(self.t)
+        for fn in (lambda: self.s.reset_password(self.c, ids["tw1"], "Reset12345"),
+                   lambda: self.s.set_active(self.c, ids["tw1"], False),
+                   lambda: self.s.delete_user(self.c, ids["tw1"]),
+                   lambda: self.s.unlock(self.c, ids["tw1"])):
+            with self.assertRaises(S.AuthError):
+                fn()
+        self.assertEqual(self.s.login("tw1", "Temp12345").username, "tw1")
+        self.s.reset_password(self.t, ids["kim"], "Reset12345")      # 타스코 마스터는 전체 관리
+
+    def test_log_work_accepts_deleted_worker_and_safe_variant(self):
+        ids = self.ids(self.t)
+        self.s.delete_user(self.t, ids["kim"])
+        self.s.log_work("work_fail", self.w, None, job="J", reason="1차 삭제")
+        self.assertFalse(self.s.user_usable(ids["kim"], "worker"))
+        self.assertTrue(self.s.user_usable(ids["lee"], "manager"))
+        self.s.log_work_safe("work_ok", self.g, self.w)               # 역할 뒤바뀜 → 예외 대신 오류 기록
+        errs = [e for e in self.s.events(self.t, group="작업") if e["type"] == "work_log_error"]
+        self.assertEqual(len(errs), 1)
+
+    def test_csv_guard_leading_space_and_quote(self):
+        for bad in (" =1+1", '"=1+1', "'@x", "-5"):
+            self.assertTrue(S._csv_safe(bad).startswith("'"), bad)
+        self.assertEqual(S._csv_safe("L2611A"), "L2611A")
+
+    def test_db_enforces_single_customer_master(self):
+        with sqlite3.connect(self.db) as c:
+            with self.assertRaises(sqlite3.IntegrityError):
+                c.execute("INSERT INTO users(username,display_name,role,pw_hash,created_at,org)"
+                          " VALUES('c2','x','master','h','2026-01-01','customer')")
+
     def test_event_groups_filter(self):
         work = self.s.events(self.t, group="작업")
         self.assertEqual(work, [])

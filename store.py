@@ -37,7 +37,7 @@ EVENT_LABEL = {
     "password_change_fail": "비밀번호 변경 실패", "master_created": "마스터 생성",
     "permission_denied": "권한 없음(시도)", "export": "기록 내보내기",
     "work_request": "1차 입력 접수", "work_retry": "2차 불일치(재입력)",
-    "work_ok": "작업 성공", "work_fail": "작업 실패",
+    "work_ok": "작업 성공", "work_fail": "작업 실패", "work_log_error": "작업 기록 오류",
 }
 EVENT_GROUPS = {
     "전체": None,
@@ -45,7 +45,7 @@ EVENT_GROUPS = {
     "계정 변경": ("user_created", "user_deleted", "user_activated", "user_deactivated",
               "password_changed", "password_reset", "password_change_fail", "account_unlocked",
               "master_created", "permission_denied", "export"),
-    "작업": ("work_request", "work_retry", "work_ok", "work_fail"),
+    "작업": ("work_request", "work_retry", "work_ok", "work_fail", "work_log_error"),
 }
 _ADMIN_TYPES = EVENT_GROUPS["계정 변경"]
 
@@ -161,7 +161,7 @@ def format_detail(detail_json: str, typ: str = "") -> str:
 def _csv_safe(v):
     """엑셀이 수식으로 실행하지 않도록 = + - @ 로 시작하는 값 앞에 ' 를 붙인다."""
     v = "" if v is None else str(v)
-    return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+    return "'" + v if v.lstrip(" \"'")[:1] in ("=", "+", "-", "@", "\t", "\r") else v
 
 
 _SCHEMA = """
@@ -180,6 +180,8 @@ CREATE TABLE IF NOT EXISTS users(
   org TEXT NOT NULL DEFAULT 'tasco',
   locked_until TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS one_customer_master ON users(org)
+  WHERE role='master' AND org='customer' AND deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS meta(
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
@@ -319,9 +321,28 @@ class Store:
     @staticmethod
     def _load(c, uid, role):
         r = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        if not r or r["role"] != role or r["deleted_at"]:
+        if not r or r["role"] != role:
             raise AuthError("계정 정보를 확인할 수 없습니다")
         return r
+
+    def user_usable(self, user_id, role):
+        """계정이 지금도 쓸 수 있는 상태(존재·역할·활성·미삭제·미잠금)인지 DB에서 확인."""
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            return bool(r and r["role"] == role and r["active"] and not r["deleted_at"]
+                        and not r["locked"])
+
+    def log_work_safe(self, typ, worker, manager=None, **info):
+        """작업 기록. 실패해도 전송 흐름을 멈추지 않고, 실패 사실을 별도 기록으로 남긴다."""
+        try:
+            self.log_work(typ, worker, manager, **info)
+        except Exception as e:
+            try:
+                d = {"유형": EVENT_LABEL.get(typ, typ), "사유": "%s" % e,
+                     "작업명": info.get("job", ""), "데이터": info.get("data", "")}
+                self.log_event("work_log_error", getattr(worker, "username", "?"), d)
+            except Exception:
+                pass
 
     # ---- 조회 ----
 
@@ -469,8 +490,11 @@ class Store:
 
     def _can_manage(self, c, m, t, what):
         """타스코 마스터는 모두, 거래처 마스터는 작업자·관리자만 관리한다."""
-        if t["role"] == "master" and not (m.org == "tasco" and t["org"] == "customer"
-                                          and t["id"] != m.id):
+        if t["role"] == "master":
+            allowed = m.org == "tasco" and t["org"] == "customer" and t["id"] != m.id
+        else:   # 작업자·관리자: 타스코 마스터는 모두, 거래처 마스터는 자기 소속만
+            allowed = m.org == "tasco" or t["org"] == m.org
+        if not allowed:
             d = {"작업": what, "대상": t["username"]}
             d.update(self._who(m))
             self._log(c, "permission_denied", m.username, d)
@@ -498,10 +522,13 @@ class Store:
                 org = "customer"
             if c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
                 raise AuthError("이미 사용했던 아이디입니다(삭제된 아이디도 다시 쓸 수 없습니다)")
-            c.execute("INSERT INTO users(username,display_name,role,pw_hash,must_change,created_at,"
-                      "org) VALUES(?,?,?,?,1,?,?)",
-                      (username, display_name.strip(), role, hash_password(temp_password), now(),
-                       org if role == "master" else m.org))
+            try:
+                c.execute("INSERT INTO users(username,display_name,role,pw_hash,must_change,"
+                          "created_at,org) VALUES(?,?,?,?,1,?,?)",
+                          (username, display_name.strip(), role, hash_password(temp_password),
+                           now(), org if role == "master" else m.org))
+            except sqlite3.IntegrityError:
+                raise AuthError("거래처 마스터는 1개만 만들 수 있습니다")
             label = "마스터(%s)" % ORG_LABEL[org] if role == "master" else ROLE_LABEL[role]
             d = {"대상": username, "이름": display_name.strip(), "역할": label}
             d.update(self._who(m))
