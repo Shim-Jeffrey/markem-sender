@@ -6,12 +6,15 @@
 import datetime
 import os
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from PIL import Image, ImageTk
 
+import auth_ui
 import ngpcl
+import store
 
 try:  # 고해상도 화면에서 글자가 흐려지지 않게
     import ctypes
@@ -21,32 +24,12 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# TASCO 브랜드: 남색 + 흰색 + 회색 계열만 사용(브랜드가이드.md)
-NAVY = "#00295B"
-NAVY_HOVER = "#0B3A78"
-WHITE = "#FFFFFF"
-BG = "#F3F5F8"
-LINE = "#D9DEE5"
-TEXT = "#1F2937"
-MUTED = "#6B7280"
-OK = "#1B6E3C"
-ERR = "#B42318"
-FONT = "Malgun Gothic"
+from app_theme import (NAVY, NAVY_HOVER, WHITE, BG, LINE, TEXT, MUTED, OK, ERR, FONT,
+                       Card)
 
 
 def visible(s):
     return s.replace("\x02", "<STX>").replace("\x03", "<ETX>")
-
-
-class Card(tk.Frame):
-    """흰 카드: 회색 테두리 + 남색 제목."""
-
-    def __init__(self, parent, title):
-        super().__init__(parent, bg=WHITE, highlightbackground=LINE, highlightthickness=1)
-        tk.Label(self, text=title, bg=WHITE, fg=NAVY, font=(FONT, 11, "bold"),
-                 anchor="w").pack(fill="x", padx=16, pady=(12, 6))
-        self.body = tk.Frame(self, bg=WHITE)
-        self.body.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
 
 def field(parent, label, row, width=22, value="", show_label=True):
@@ -59,22 +42,89 @@ def field(parent, label, row, width=22, value="", show_label=True):
 
 
 class App(tk.Tk):
+    IDLE_SECONDS = 600   # 미사용 10분이면 자동 로그아웃
+
     def __init__(self):
         super().__init__()
         self.title("TASCO 프린터 데이터 전송")
-        self.minsize(980, 680)
+        self.minsize(720, 520)
         self.configure(bg=BG)
+        self.busy = False
+        self.user = None
+        self.pages = {}
+        self.store = store.Store()
         self._style()
         self._header()
-        self._tabs()
-        self._log_panel()
-        self.busy = False
-        self.show("TTO")
-        # 화면 배율(DPI)에 따라 글자가 커져도 잘리지 않도록 내용 크기에 맞춘다
+        self.content = tk.Frame(self, bg=BG)
+        self.content.pack(fill="both", expand=True)
+        self._last = time.time()
+        for ev in ("<Key>", "<Button>", "<Motion>"):
+            self.bind_all(ev, self._touch, add="+")
+        self.after(30000, self._idle_check)
+        self.start()
+
+    def fit(self, minw, minh):
+        """화면 배율(DPI)에 따라 글자가 커져도 잘리지 않도록 내용 크기에 맞춘다."""
         self.update_idletasks()
-        w = min(max(self.winfo_reqwidth(), 1120), self.winfo_screenwidth() - 40)
-        h = min(self.winfo_reqheight() + 10, self.winfo_screenheight() - 90)
+        w = min(max(self.winfo_reqwidth(), minw), self.winfo_screenwidth() - 40)
+        h = min(max(self.winfo_reqheight() + 10, minh), self.winfo_screenheight() - 90)
         self.geometry("%dx%d+30+20" % (w, h))
+
+    # ---- 로그인 흐름 ----
+    def _clear(self):
+        for w in self.content.winfo_children():
+            w.destroy()
+
+    def start(self, notice=""):
+        self.user = None
+        self._set_user(None)
+        self._clear()
+        if self.store.has_master():
+            f = auth_ui.LoginFrame(self.content, self, notice)
+        else:
+            f = auth_ui.SetupFrame(self.content, self)
+        f.pack(fill="both", expand=True)
+        self.fit(760, 600)
+
+    def after_login(self, user):
+        self.user = user
+        self._set_user(user)
+        if user.must_change:
+            self._clear()
+            auth_ui.ChangePasswordFrame(self.content, self, user).pack(fill="both", expand=True)
+        else:
+            self.enter_main(user)
+
+    def enter_main(self, user):
+        self._clear()
+        self._set_user(user)
+        if user.role == "master":
+            tabs = (("ACC", "계정 관리", auth_ui.AccountsPage), ("EVT", "기록", auth_ui.EventsPage))
+        else:
+            tabs = (("TTO", "TTO  열전사", TtoPage), ("CIJ", "CIJ  잉크젯", CijPage))
+        self._tabs(tabs)
+        if user.role != "master":
+            self._log_panel()
+        self.show(tabs[0][0])
+        self.fit(1120, 700)
+
+    def logout(self, notice=""):
+        if self.user:
+            self.store.logout(self.user)
+        tto = self.pages.get("TTO")
+        if tto:
+            tto.client.close()
+        self.busy = False
+        self.pages = {}
+        self.start(notice)
+
+    def _touch(self, _e=None):
+        self._last = time.time()
+
+    def _idle_check(self):
+        if self.user and not self.busy and time.time() - self._last > self.IDLE_SECONDS:
+            self.logout("미사용 10분이 지나 자동으로 로그아웃되었습니다")
+        self.after(30000, self._idle_check)
 
     # ---- 스타일 ----
     def _style(self):
@@ -115,18 +165,33 @@ class App(tk.Tk):
         tk.Frame(bar, bg="#3C5C8A", width=1).pack(side="left", fill="y", pady=16)
         tk.Label(bar, text="프린터 데이터 전송", bg=NAVY, fg=WHITE,
                  font=(FONT, 13, "bold")).pack(side="left", padx=14)
-        tk.Label(bar, text="초안 v0.1", bg=NAVY, fg="#9DB2D0", font=(FONT, 9)).pack(
-            side="right", padx=22)
+        tk.Label(bar, text="초안 v0.2", bg=NAVY, fg="#9DB2D0", font=(FONT, 9)).pack(
+            side="right", padx=(10, 22))
+        self.logout_btn = tk.Label(bar, text="로그아웃", bg=NAVY, fg=WHITE, font=(FONT, 9, "bold"),
+                                   padx=12, pady=5, cursor="hand2", highlightthickness=1,
+                                   highlightbackground="#9DB2D0")
+        self.logout_btn.bind("<Button-1>", lambda e: self.logout())
+        self.user_lbl = tk.Label(bar, text="", bg=NAVY, fg=WHITE, font=(FONT, 10))
 
-    def _tabs(self):
-        row = tk.Frame(self, bg=BG)
+    def _set_user(self, user):
+        if user:
+            self.user_lbl.configure(text="%s  ·  %s" % (user.display_name,
+                                                        store.ROLE_LABEL[user.role]))
+            self.logout_btn.pack(side="right", padx=(0, 6))
+            self.user_lbl.pack(side="right", padx=(0, 14))
+        else:
+            self.logout_btn.pack_forget()
+            self.user_lbl.pack_forget()
+
+    def _tabs(self, tabs):
+        row = tk.Frame(self.content, bg=BG)
         row.pack(fill="x", padx=22, pady=(16, 8))
         self.tab_btns = {}
         self.pages = {}
-        host = tk.Frame(self, bg=BG)
+        host = tk.Frame(self.content, bg=BG)
         host.pack(fill="both", expand=True, padx=22)
         self.host = host
-        for key, label, cls in (("TTO", "TTO  열전사", TtoPage), ("CIJ", "CIJ  잉크젯", CijPage)):
+        for key, label, cls in tabs:
             b = tk.Label(row, text=label, font=(FONT, 10, "bold"), padx=22, pady=8,
                          cursor="hand2", bd=0, highlightthickness=1, highlightbackground=NAVY)
             b.pack(side="left")
@@ -142,7 +207,7 @@ class App(tk.Tk):
         self.pages[key].pack(fill="both", expand=True)
 
     def _log_panel(self):
-        card = Card(self, "통신 로그")
+        card = Card(self.content, "통신 로그")
         card.pack(fill="x", padx=22, pady=(8, 18))
         wrap = tk.Frame(card.body, bg=WHITE)
         wrap.pack(fill="both", expand=True)
@@ -161,10 +226,13 @@ class App(tk.Tk):
         def put():
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             arrow = {"TX": "→ 송신", "RX": "← 수신", "ERR": "✕ 오류", "INFO": "· 정보"}[kind]
-            self.logbox.configure(state="normal")
-            self.logbox.insert("end", "%s  %s  %s\n" % (ts, arrow, visible(text)), kind)
-            self.logbox.see("end")
-            self.logbox.configure(state="disabled")
+            try:
+                self.logbox.configure(state="normal")
+                self.logbox.insert("end", "%s  %s  %s\n" % (ts, arrow, visible(text)), kind)
+                self.logbox.see("end")
+                self.logbox.configure(state="disabled")
+            except (AttributeError, tk.TclError):
+                pass  # 로그아웃으로 화면이 바뀐 뒤 도착한 기록
         self.after(0, put)
 
     def run(self, work, done=None):
