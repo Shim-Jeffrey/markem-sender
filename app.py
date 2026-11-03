@@ -189,7 +189,20 @@ class App(tk.Tk):
                     font=(FONT, 9, "bold"), relief="flat")
         s.map("Treeview", background=[("selected", "#DCE6F4")], foreground=[("selected", NAVY)])
 
+    def _window_icon(self):
+        """창 아이콘: TASCO 엠블럼(정사각형으로 여백을 두고 맞춘다)."""
+        try:
+            src = Image.open(os.path.join(HERE, "assets", "emblem_navy.png")).convert("RGBA")
+            side = max(src.size)
+            sq = Image.new("RGBA", (side, side), (255, 255, 255, 255))
+            sq.alpha_composite(src, ((side - src.width) // 2, (side - src.height) // 2))
+            self._icon = ImageTk.PhotoImage(sq.resize((64, 64), Image.LANCZOS))
+            self.iconphoto(True, self._icon)
+        except Exception:
+            pass
+
     def _header(self):
+        self._window_icon()
         bar = tk.Frame(self, bg=NAVY, height=64)
         bar.pack(fill="x")
         bar.pack_propagate(False)

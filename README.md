@@ -10,6 +10,15 @@
 - 필요: Python 3.13, Pillow (`pip install pillow`)
 - 시험: `python -m unittest discover -s tests` (51개)
 
+## 설치 파일
+
+- 만들기: `pip install pyinstaller pillow` 후 `python installer/build.py` → `dist\MarkemSender_Setup_<버전>.exe` (약 31MB)
+- 설치: Setup.exe 더블클릭 → 확인 → 끝. **관리자 권한 불필요**, 현재 Windows 사용자 폴더(`%LOCALAPPDATA%\Programs\TASCO\MarkemSender`)에 설치, 시작 메뉴·바탕화면 바로가기와 "앱 및 기능" 제거 항목 생성
+- 일괄 설치: `MarkemSender_Setup_<버전>.exe /Q` (대화상자 없음)
+- 제거: "앱 및 기능"에서 제거. 계정·기록 데이터(`C:\ProgramData\TASCO\MarkemSender`)는 지우지 않고 남김
+- 업데이트: 새 Setup.exe를 실행하면 프로그램 파일만 바뀌고 계정·기록은 그대로
+- 코드 서명이 없어 처음 실행 때 Windows SmartScreen 경고가 뜰 수 있음("추가 정보 → 실행")
+
 ## 사용 흐름
 
 1. 처음 실행: **타스코 마스터** 계정 만들기. 타스코 마스터가 계정 추가에서 **거래처 마스터(1개)**, 작업자, 관리자를 만든다
