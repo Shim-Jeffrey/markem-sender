@@ -1,11 +1,13 @@
 """계정·기록 저장 (로컬 SQLite). 설계: docs/설계-이중입력.md
 
 - 비밀번호는 scrypt 해시로만 저장한다(원문 저장 없음).
-- 모든 사건(로그인·계정 변경)은 해시 체인 기록에 남긴다(변조 감지용).
+- 모든 사건(로그인·계정 변경·작업 결과)은 해시 체인 기록에 남긴다(변조 감지용).
 - 계정 변경은 호출자를 DB에서 다시 확인한다(화면의 사용자 객체를 믿지 않는다).
+- 마스터는 2개: 타스코(tasco) 마스터가 상위, 거래처(customer) 마스터는 1개만.
 """
 import base64
 import contextlib
+import csv
 import datetime
 import hashlib
 import hmac
@@ -18,10 +20,34 @@ from dataclasses import dataclass
 
 ROLES = ("worker", "manager", "master")
 ROLE_LABEL = {"worker": "1차 작업자", "manager": "2차 관리자", "master": "마스터"}
+ORG_LABEL = {"tasco": "타스코", "customer": "거래처"}
 MAX_FAILED = 5
+MASTER_LOCK_MINUTES = 15          # 마스터는 서로 풀 수 없으므로 잠금이 시간이 지나면 풀린다
 _USER_RE = re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 _SCRYPT = (2 ** 14, 8, 1)
 GENERIC_FAIL = "아이디 또는 비밀번호가 올바르지 않습니다"
+
+EVENT_LABEL = {
+    "login_ok": "로그인", "login_fail": "로그인 실패", "logout": "로그아웃",
+    "account_locked": "계정 잠김", "account_unlocked": "잠금 해제",
+    "account_unlocked_auto": "잠금 자동 해제",
+    "user_created": "계정 추가", "user_deleted": "계정 삭제",
+    "user_activated": "계정 활성화", "user_deactivated": "계정 비활성화",
+    "password_changed": "비밀번호 변경", "password_reset": "비밀번호 초기화",
+    "password_change_fail": "비밀번호 변경 실패", "master_created": "마스터 생성",
+    "permission_denied": "권한 없음(시도)", "export": "기록 내보내기",
+    "work_request": "1차 입력 접수", "work_retry": "2차 불일치(재입력)",
+    "work_ok": "작업 성공", "work_fail": "작업 실패",
+}
+EVENT_GROUPS = {
+    "전체": None,
+    "로그인": ("login_ok", "login_fail", "logout", "account_locked", "account_unlocked_auto"),
+    "계정 변경": ("user_created", "user_deleted", "user_activated", "user_deactivated",
+              "password_changed", "password_reset", "password_change_fail", "account_unlocked",
+              "master_created", "permission_denied", "export"),
+    "작업": ("work_request", "work_retry", "work_ok", "work_fail"),
+}
+_ADMIN_TYPES = EVENT_GROUPS["계정 변경"]
 
 
 class AuthError(Exception):
@@ -38,6 +64,15 @@ class User:
     active: bool = True
     locked: bool = False
     deleted: bool = False
+    org: str = "tasco"
+    login_ts: str = ""
+
+    @property
+    def label(self):
+        """화면 표시용 역할 이름. 마스터는 소속을 붙인다."""
+        if self.role == "master":
+            return "마스터(%s)" % ORG_LABEL.get(self.org, self.org)
+        return ROLE_LABEL[self.role]
 
 
 def default_data_dir():
@@ -104,6 +139,31 @@ def gen_temp_password() -> str:
             return pw
 
 
+def format_detail(detail_json: str, typ: str = "") -> str:
+    """기록의 내용(JSON)을 읽기 쉽게 바꾼다. 작업 기록은 '1차 누구 / 2차 누구 / 작업명 …' 형태."""
+    try:
+        d = json.loads(detail_json)
+    except ValueError:
+        return detail_json
+    if not isinstance(d, dict):
+        return str(d)
+    if typ.startswith("work_"):
+        two = "2차 %s(%s)" % (d.get("2차이름", ""), d["2차"]) if d.get("2차", "없음") != "없음"             else "2차 없음"
+        head = ["1차 %s(%s)" % (d.get("1차이름", ""), d.get("1차", "")), two]
+        used = {"결과", "1차", "1차이름", "2차", "2차이름", "1차접속", "2차접속"}
+        rest = ["%s=%s" % (k, ", ".join(v) if isinstance(v, list) else v)
+                for k, v in d.items() if k not in used and v not in ("", None, [])]
+        return " / ".join(head + rest)
+    return "; ".join("%s=%s" % (k, ", ".join(v) if isinstance(v, list) else v)
+                     for k, v in d.items() if v not in ("", None, []))
+
+
+def _csv_safe(v):
+    """엑셀이 수식으로 실행하지 않도록 = + - @ 로 시작하는 값 앞에 ' 를 붙인다."""
+    v = "" if v is None else str(v)
+    return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,7 +176,9 @@ CREATE TABLE IF NOT EXISTS users(
   failed INTEGER NOT NULL DEFAULT 0,
   locked INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
-  deleted_at TEXT
+  deleted_at TEXT,
+  org TEXT NOT NULL DEFAULT 'tasco',
+  locked_until TEXT
 );
 CREATE TABLE IF NOT EXISTS meta(
   k TEXT PRIMARY KEY,
@@ -139,16 +201,28 @@ class Store:
         self.path = path or os.path.join(default_data_dir(), "data.db")
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+            for name, ddl in (("org", "TEXT NOT NULL DEFAULT 'tasco'"), ("locked_until", "TEXT")):
+                if name not in cols:      # 이전 버전 DB 이전
+                    c.execute("ALTER TABLE users ADD COLUMN %s %s" % (name, ddl))
         # 존재하지 않는 계정도 같은 시간이 걸리도록 쓰는 가짜 해시
         self._dummy = hash_password("dummy-password-0")
 
     @contextlib.contextmanager
-    def _conn(self):
+    def _conn(self, keep=False):
+        """keep=True: 권한 거부(AuthError)로 끝나도 그 전까지 남긴 기록은 저장한다.
+        (거부 시도 기록용. 쓰는 곳은 거부 전에 다른 변경을 하지 않는다.)"""
         c = sqlite3.connect(self.path, timeout=10)
         c.row_factory = sqlite3.Row
         try:
             yield c
             c.commit()
+        except AuthError:
+            if keep:
+                c.commit()
+            else:
+                c.rollback()
+            raise
         except Exception:
             c.rollback()
             raise
@@ -179,11 +253,18 @@ class Store:
         with self._conn() as c:
             self._log(c, typ, actor, detail)
 
-    def events(self, actor, limit=500):
+    def events(self, actor, limit=500, group="전체"):
+        types = EVENT_GROUPS[group]
         with self._conn() as c:
             self._require_master(c, actor)
-            return [dict(r) for r in c.execute(
-                "SELECT ts,type,actor,detail FROM events ORDER BY id DESC LIMIT ?", (limit,))]
+            if types is None:
+                rows = c.execute("SELECT ts,type,actor,detail FROM events ORDER BY id DESC LIMIT ?",
+                                 (limit,))
+            else:
+                q = ",".join("?" * len(types))
+                rows = c.execute("SELECT ts,type,actor,detail FROM events WHERE type IN (%s) "
+                                 "ORDER BY id DESC LIMIT ?" % q, (*types, limit))
+            return [dict(r) for r in rows]
 
     def verify_chain(self, actor):
         """기록이 중간에 고쳐지거나 지워졌는지 확인. (정상 여부, 문제 설명)
@@ -208,12 +289,47 @@ class Store:
                 return False, "끝부분 기록이 지워졌거나 기준값과 다릅니다"
             return True, None
 
+    # ---- 작업 기록 (이중 입력 결과) ----
+
+    def log_work(self, typ, worker, manager=None, **info):
+        """작업 로그. typ: work_request / work_retry / work_ok / work_fail.
+
+        worker·manager 는 DB에서 다시 확인한다(역할·상태가 맞지 않으면 기록하지 않는다).
+        info: job(작업명), data(데이터), reason(사유), tries(불일치 횟수), fields(불일치 필드명)
+        """
+        if typ not in ("work_request", "work_retry", "work_ok", "work_fail"):
+            raise ValueError(typ)
+        with self._conn() as c:
+            w = self._load(c, worker.id, "worker")
+            m = self._load(c, manager.id, "manager") if manager else None
+            d = {"결과": EVENT_LABEL[typ],
+                 "1차": w["username"], "1차이름": w["display_name"],
+                 "2차": m["username"] if m else "없음", "2차이름": m["display_name"] if m else "",
+                 "1차접속": getattr(worker, "login_ts", ""),
+                 "2차접속": getattr(manager, "login_ts", "") if manager else ""}
+            names = {"job": "작업명", "kind": "작업종류", "data": "데이터", "reason": "사유",
+                     "tries": "불일치횟수", "fields": "불일치필드"}
+            for k, v in info.items():
+                if k not in names:
+                    raise ValueError(k)
+                if v not in (None, "", []):
+                    d[names[k]] = v
+            self._log(c, typ, w["username"], d)
+
+    @staticmethod
+    def _load(c, uid, role):
+        r = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not r or r["role"] != role or r["deleted_at"]:
+            raise AuthError("계정 정보를 확인할 수 없습니다")
+        return r
+
     # ---- 조회 ----
 
     @staticmethod
-    def _user(r):
+    def _user(r, login_ts=""):
         return User(r["id"], r["username"], r["display_name"], r["role"], bool(r["must_change"]),
-                    bool(r["active"]), bool(r["locked"]), r["deleted_at"] is not None)
+                    bool(r["active"]), bool(r["locked"]), r["deleted_at"] is not None,
+                    r["org"], login_ts)
 
     def has_master(self):
         with self._conn() as c:
@@ -230,7 +346,7 @@ class Store:
         with self._conn() as c:
             self._require_master(c, actor)
             return [self._user(r) for r in c.execute(
-                "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY role DESC, username")]
+                "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY role DESC, org, username")]
 
     # ---- 첫 마스터 ----
 
@@ -241,11 +357,11 @@ class Store:
             if c.execute("SELECT 1 FROM users WHERE role='master' AND deleted_at IS NULL"
                          ).fetchone():
                 raise AuthError("이미 마스터 계정이 있습니다")
-            c.execute("INSERT INTO users(username,display_name,role,pw_hash,must_change,created_at)"
-                      " VALUES(?,?,?,?,0,?)",
+            c.execute("INSERT INTO users(username,display_name,role,pw_hash,must_change,created_at,"
+                      "org) VALUES(?,?,?,?,0,?,'tasco')",
                       (username, display_name.strip() or username, "master",
                        hash_password(password), now()))
-            self._log(c, "master_created", username, {"username": username})
+            self._log(c, "master_created", username, {"대상": username, "소속": "타스코"})
 
     @staticmethod
     def _check_username(username):
@@ -256,6 +372,24 @@ class Store:
 
     # ---- 로그인 ----
 
+    def _record_failure(self, c, r, typ, base_detail):
+        """실패 횟수를 올리고 한도에 닿으면 잠근다. 잠겼으면 True."""
+        failed = r["failed"] + 1
+        lock = failed >= MAX_FAILED
+        until = None
+        if lock and r["role"] == "master":
+            until = (datetime.datetime.now() + datetime.timedelta(minutes=MASTER_LOCK_MINUTES)
+                     ).isoformat(timespec="seconds")
+        c.execute("UPDATE users SET failed=?, locked=?, locked_until=? WHERE id=?",
+                  (failed, 1 if lock else 0, until, r["id"]))
+        d = dict(base_detail)
+        d["횟수"] = failed
+        self._log(c, typ, r["username"], d)
+        if lock:
+            self._log(c, "account_locked", r["username"],
+                      {"자동해제": "%d분 뒤" % MASTER_LOCK_MINUTES} if until else {})
+        return lock
+
     def login(self, username, password) -> User:
         # 실패 기록(횟수·잠금·이력)이 롤백되지 않도록, 예외는 저장이 끝난 뒤에 던진다.
         uname = (username or "").strip().lower()
@@ -263,30 +397,36 @@ class Store:
         user = None
         with self._conn() as c:
             r = c.execute("SELECT * FROM users WHERE username=?", (uname,)).fetchone()
-            usable = r is not None and bool(r["active"]) and not r["deleted_at"]                 and bool(r["pw_hash"])
-            ok = verify_password(password or "", r["pw_hash"] if usable else self._dummy)                 and usable
+            usable = (r is not None and bool(r["active"]) and not r["deleted_at"]
+                      and bool(r["pw_hash"]))
+            ok = usable and verify_password(password or "", r["pw_hash"])
             if not usable:
+                verify_password(password or "", self._dummy)    # 시간 차이로 계정 유무가 드러나지 않게
                 known = r is not None
                 self._log(c, "login_fail", uname if known else "(없는 아이디)",
                           {"reason": "비활성 또는 삭제" if known else "없는 아이디"})
                 err = GENERIC_FAIL
-            elif r["locked"]:
-                self._log(c, "login_fail", uname, {"reason": "잠김"})
-                err = "계정이 잠겼습니다. 마스터에게 문의하세요"
-            elif not ok:
-                failed = r["failed"] + 1
-                lock = 1 if failed >= MAX_FAILED else 0
-                c.execute("UPDATE users SET failed=?, locked=? WHERE id=?", (failed, lock, r["id"]))
-                self._log(c, "login_fail", uname, {"reason": "비밀번호 불일치", "횟수": failed})
-                if lock:
-                    self._log(c, "account_locked", uname, {})
-                    err = "로그인 %d회 실패로 계정이 잠겼습니다. 마스터에게 문의하세요" % MAX_FAILED
-                else:
-                    err = GENERIC_FAIL
             else:
-                c.execute("UPDATE users SET failed=0 WHERE id=?", (r["id"],))
-                self._log(c, "login_ok", uname, {"role": r["role"], "name": r["display_name"]})
-                user = self._user(r)
+                if r["locked"] and r["locked_until"] and now() >= r["locked_until"]:
+                    c.execute("UPDATE users SET locked=0, failed=0, locked_until=NULL WHERE id=?",
+                              (r["id"],))
+                    self._log(c, "account_unlocked_auto", uname, {})
+                    r = c.execute("SELECT * FROM users WHERE id=?", (r["id"],)).fetchone()
+                if r["locked"]:
+                    self._log(c, "login_fail", uname, {"reason": "잠김"})
+                    err = "계정이 잠겼습니다. 마스터에게 문의하세요" if r["role"] != "master" \
+                        else "계정이 잠겼습니다. %d분 뒤 다시 시도하세요" % MASTER_LOCK_MINUTES
+                elif not ok:
+                    if self._record_failure(c, r, "login_fail", {"reason": "비밀번호 불일치"}):
+                        err = "로그인 %d회 실패로 계정이 잠겼습니다" % MAX_FAILED
+                    else:
+                        err = GENERIC_FAIL
+                else:
+                    c.execute("UPDATE users SET failed=0 WHERE id=?", (r["id"],))
+                    ts = now()
+                    self._log(c, "login_ok", uname, {"role": r["role"], "name": r["display_name"],
+                                                      "소속": ORG_LABEL.get(r["org"], r["org"])})
+                    user = self._user(r, ts)
         if err:
             raise AuthError(err)
         return user
@@ -302,13 +442,8 @@ class Store:
             if not r or not r["active"] or r["deleted_at"] or r["locked"]:
                 err = "비밀번호를 바꿀 수 없는 계정입니다. 마스터에게 문의하세요"
             elif not verify_password(old, r["pw_hash"]):
-                failed = r["failed"] + 1
-                lock = 1 if failed >= MAX_FAILED else 0
-                c.execute("UPDATE users SET failed=?, locked=? WHERE id=?", (failed, lock, r["id"]))
-                self._log(c, "password_change_fail", r["username"], {"횟수": failed})
-                if lock:
-                    self._log(c, "account_locked", r["username"], {})
-                    err = "실패 %d회로 계정이 잠겼습니다. 마스터에게 문의하세요" % MAX_FAILED
+                if self._record_failure(c, r, "password_change_fail", {}):
+                    err = "실패 %d회로 계정이 잠겼습니다" % MAX_FAILED
                 else:
                     err = "현재 비밀번호가 올바르지 않습니다"
             else:
@@ -328,73 +463,169 @@ class Store:
 
     # ---- 계정 관리(마스터 전용) ----
 
+    @staticmethod
+    def _who(m):
+        return {"실행자": m.display_name, "소속": ORG_LABEL.get(m.org, m.org)}
+
+    def _can_manage(self, c, m, t, what):
+        """타스코 마스터는 모두, 거래처 마스터는 작업자·관리자만 관리한다."""
+        if t["role"] == "master" and not (m.org == "tasco" and t["org"] == "customer"
+                                          and t["id"] != m.id):
+            d = {"작업": what, "대상": t["username"]}
+            d.update(self._who(m))
+            self._log(c, "permission_denied", m.username, d)
+            raise AuthError("이 계정은 관리할 수 없습니다(권한 없음)")
+
     def create_user(self, actor, username, display_name, role, temp_password):
-        if role not in ("worker", "manager"):
-            raise AuthError("마스터는 첫 실행 때만 만들 수 있습니다")
+        if role not in ("worker", "manager", "master"):
+            raise AuthError("역할이 올바르지 않습니다")
         username = self._check_username(username)
         check_policy(temp_password, username)
         if not display_name.strip():
             raise AuthError("이름을 입력하세요")
-        with self._conn() as c:
+        with self._conn(keep=True) as c:
             m = self._require_master(c, actor)
+            org = m.org
+            if role == "master":
+                if m.org != "tasco":
+                    d = {"작업": "마스터 추가"}
+                    d.update(self._who(m))
+                    self._log(c, "permission_denied", m.username, d)
+                    raise AuthError("거래처 마스터는 타스코 마스터만 만들 수 있습니다")
+                if c.execute("SELECT 1 FROM users WHERE role='master' AND org='customer' "
+                             "AND deleted_at IS NULL").fetchone():
+                    raise AuthError("거래처 마스터는 1개만 만들 수 있습니다(먼저 기존 계정을 삭제하세요)")
+                org = "customer"
             if c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
                 raise AuthError("이미 사용했던 아이디입니다(삭제된 아이디도 다시 쓸 수 없습니다)")
-            c.execute("INSERT INTO users(username,display_name,role,pw_hash,must_change,created_at)"
-                      " VALUES(?,?,?,?,1,?)",
-                      (username, display_name.strip(), role, hash_password(temp_password), now()))
-            self._log(c, "user_created", m.username,
-                      {"대상": username, "이름": display_name.strip(), "role": role})
+            c.execute("INSERT INTO users(username,display_name,role,pw_hash,must_change,created_at,"
+                      "org) VALUES(?,?,?,?,1,?,?)",
+                      (username, display_name.strip(), role, hash_password(temp_password), now(),
+                       org if role == "master" else m.org))
+            label = "마스터(%s)" % ORG_LABEL[org] if role == "master" else ROLE_LABEL[role]
+            d = {"대상": username, "이름": display_name.strip(), "역할": label}
+            d.update(self._who(m))
+            self._log(c, "user_created", m.username, d)
 
-    def _target(self, c, m, user_id):
+    def _target(self, c, user_id):
         t = c.execute("SELECT * FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
         if not t:
             raise AuthError("계정을 찾을 수 없습니다")
         return t
 
     def _guard_last_master(self, c, t, what):
-        if t["role"] == "master":
-            n = c.execute("SELECT COUNT(*) FROM users WHERE role='master' AND active=1 "
-                          "AND deleted_at IS NULL AND id<>?", (t["id"],)).fetchone()[0]
+        if t["role"] == "master" and t["org"] == "tasco":
+            n = c.execute("SELECT COUNT(*) FROM users WHERE role='master' AND org='tasco' "
+                          "AND active=1 AND deleted_at IS NULL AND id<>?", (t["id"],)).fetchone()[0]
             if n == 0:
-                raise AuthError("마지막 마스터 계정은 %s할 수 없습니다" % what)
+                raise AuthError("마지막 타스코 마스터 계정은 %s할 수 없습니다" % what)
 
     def set_active(self, actor, user_id, active):
-        with self._conn() as c:
+        with self._conn(keep=True) as c:
             m = self._require_master(c, actor)
-            t = self._target(c, m, user_id)
+            t = self._target(c, user_id)
+            if not active and t["id"] == m.id:
+                raise AuthError("자기 자신은 비활성화할 수 없습니다")
+            self._can_manage(c, m, t, "활성화" if active else "비활성화")
             if not active:
-                if t["id"] == m.id:
-                    raise AuthError("자기 자신은 비활성화할 수 없습니다")
                 self._guard_last_master(c, t, "비활성화")
             c.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, t["id"]))
-            self._log(c, "user_activated" if active else "user_deactivated", m.username,
-                      {"대상": t["username"]})
+            d = {"대상": t["username"], "이름": t["display_name"],
+                 "이전": "사용" if t["active"] else "비활성", "이후": "사용" if active else "비활성"}
+            d.update(self._who(m))
+            self._log(c, "user_activated" if active else "user_deactivated", m.username, d)
 
     def delete_user(self, actor, user_id):
         """삭제: 로그인 불가 + 목록에서 제거. 아이디와 과거 기록은 남긴다."""
-        with self._conn() as c:
+        with self._conn(keep=True) as c:
             m = self._require_master(c, actor)
-            t = self._target(c, m, user_id)
+            t = self._target(c, user_id)
             if t["id"] == m.id:
                 raise AuthError("자기 자신은 삭제할 수 없습니다")
+            self._can_manage(c, m, t, "삭제")
             self._guard_last_master(c, t, "삭제")
             c.execute("UPDATE users SET deleted_at=?, active=0, pw_hash='' WHERE id=?",
                       (now(), t["id"]))
-            self._log(c, "user_deleted", m.username,
-                      {"대상": t["username"], "이름": t["display_name"]})
+            lab = "마스터(%s)" % ORG_LABEL[t["org"]] if t["role"] == "master" else ROLE_LABEL[t["role"]]
+            d = {"대상": t["username"], "이름": t["display_name"], "역할": lab}
+            d.update(self._who(m))
+            self._log(c, "user_deleted", m.username, d)
 
     def reset_password(self, actor, user_id, temp_password):
-        with self._conn() as c:
+        with self._conn(keep=True) as c:
             m = self._require_master(c, actor)
-            t = self._target(c, m, user_id)
+            t = self._target(c, user_id)
+            self._can_manage(c, m, t, "비밀번호 초기화")
             check_policy(temp_password, t["username"])
-            c.execute("UPDATE users SET pw_hash=?, must_change=1, failed=0, locked=0 WHERE id=?",
-                      (hash_password(temp_password), t["id"]))
-            self._log(c, "password_reset", m.username, {"대상": t["username"]})
+            c.execute("UPDATE users SET pw_hash=?, must_change=1, failed=0, locked=0, "
+                      "locked_until=NULL WHERE id=?", (hash_password(temp_password), t["id"]))
+            d = {"대상": t["username"], "이름": t["display_name"]}
+            d.update(self._who(m))
+            self._log(c, "password_reset", m.username, d)
 
     def unlock(self, actor, user_id):
+        with self._conn(keep=True) as c:
+            m = self._require_master(c, actor)
+            t = self._target(c, user_id)
+            self._can_manage(c, m, t, "잠금 해제")
+            c.execute("UPDATE users SET failed=0, locked=0, locked_until=NULL WHERE id=?",
+                      (t["id"],))
+            d = {"대상": t["username"], "이름": t["display_name"]}
+            d.update(self._who(m))
+            self._log(c, "account_unlocked", m.username, d)
+
+    # ---- CSV 내보내기 (마스터 전용) ----
+
+    def export_work_csv(self, actor, path, since=None, until=None):
+        """작업 로그(최종 결과만). since/until: 'YYYY-MM-DD' 문자열(포함)."""
+        head = ["1차 접속시간", "2차 접속시간", "처리시각", "결과", "1차 담당자", "2차 담당자",
+                "작업명", "작업 종류", "데이터", "불일치 횟수", "실패 사유"]
+        rows = []
+        for e in reversed(self._events_between(actor, ("work_ok", "work_fail"), since, until)):
+            d = json.loads(e["detail"])
+            rows.append([d.get("1차접속", ""), d.get("2차접속", ""), e["ts"].replace("T", " "),
+                         d.get("결과", ""),
+                         "%s(%s)" % (d.get("1차이름", ""), d.get("1차", "")),
+                         "없음" if d.get("2차", "없음") == "없음"
+                         else "%s(%s)" % (d.get("2차이름", ""), d.get("2차", "")),
+                         d.get("작업명", ""), d.get("작업종류", ""), d.get("데이터", ""),
+                         d.get("불일치횟수", ""), d.get("사유", "")])
+        return self._write_csv(actor, path, head, rows, "작업 로그")
+
+    def export_event_csv(self, actor, path, group="계정 변경", since=None, until=None):
+        """로그인·계정 변경 기록. 마스터가 바꾼 내역(실행자·소속·이전/이후)이 내용에 들어간다."""
+        types = EVENT_GROUPS[group]
+        head = ["시각", "종류", "계정", "내용"]
+        rows = [[e["ts"].replace("T", " "), EVENT_LABEL.get(e["type"], e["type"]), e["actor"],
+                 format_detail(e["detail"], e["type"])]
+                for e in reversed(self._events_between(actor, types, since, until))]
+        return self._write_csv(actor, path, head, rows, "기록(%s)" % group)
+
+    def _events_between(self, actor, types, since, until):
+        with self._conn() as c:
+            self._require_master(c, actor)
+            q, args = "SELECT ts,type,actor,detail FROM events WHERE 1=1", []
+            if types:
+                q += " AND type IN (%s)" % ",".join("?" * len(types))
+                args += list(types)
+            if since:
+                q += " AND ts >= ?"
+                args.append(since)
+            if until:
+                q += " AND ts < ?"
+                args.append((datetime.date.fromisoformat(until) + datetime.timedelta(days=1)
+                             ).isoformat())
+            return [dict(r) for r in c.execute(q + " ORDER BY id DESC", args)]
+
+    def _write_csv(self, actor, path, head, rows, kind):
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(head)
+            for r in rows:
+                w.writerow([_csv_safe(x) for x in r])
         with self._conn() as c:
             m = self._require_master(c, actor)
-            t = self._target(c, m, user_id)
-            c.execute("UPDATE users SET failed=0, locked=0 WHERE id=?", (t["id"],))
-            self._log(c, "account_unlocked", m.username, {"대상": t["username"]})
+            d = {"종류": kind, "건수": len(rows)}
+            d.update(self._who(m))
+            self._log(c, "export", m.username, d)
+        return len(rows)

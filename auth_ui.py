@@ -1,19 +1,10 @@
 """로그인·최초 마스터 설정·비밀번호 변경·계정 관리·기록 화면 (설계: docs/설계-이중입력.md)."""
+import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import filedialog, ttk, messagebox
 
 import store as S
 from app_theme import (BG, WHITE, NAVY, MUTED, LINE, ERR, TEXT, FONT, Card)
-
-EVENT_LABEL = {
-    "login_ok": "로그인", "login_fail": "로그인 실패", "logout": "로그아웃",
-    "account_locked": "계정 잠김", "account_unlocked": "잠금 해제",
-    "user_created": "계정 생성", "user_deleted": "계정 삭제",
-    "user_activated": "계정 활성화", "user_deactivated": "계정 비활성화",
-    "password_changed": "비밀번호 변경", "password_reset": "비밀번호 초기화",
-    "master_created": "마스터 생성", "password_change_fail": "비밀번호 변경 실패",
-}
-
 
 def _entry(parent, label, row, secret=False, width=28):
     tk.Label(parent, text=label, bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
@@ -132,7 +123,7 @@ class AccountsPage(tk.Frame):
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
         self.tree = ttk.Treeview(left.body, columns=("id", "name", "role", "state"),
                                  show="headings", height=10, selectmode="browse")
-        for c, t, w in (("id", "아이디", 130), ("name", "이름", 130), ("role", "역할", 110),
+        for c, t, w in (("id", "아이디", 130), ("name", "이름", 130), ("role", "역할", 130),
                         ("state", "상태", 190)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w)
@@ -151,8 +142,11 @@ class AccountsPage(tk.Frame):
         self.f_name = _entry(g, "이름", 1, width=20)
         tk.Label(g, text="역할", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(row=2, column=0,
                                                                          sticky="w", pady=5)
+        self._roles = [("worker", S.ROLE_LABEL["worker"]), ("manager", S.ROLE_LABEL["manager"])]
+        if app.user.org == "tasco":
+            self._roles.append(("master", "마스터(거래처)"))
         self.f_role = ttk.Combobox(g, state="readonly", width=18,
-                                   values=[S.ROLE_LABEL["worker"], S.ROLE_LABEL["manager"]])
+                                   values=[lab for _, lab in self._roles])
         self.f_role.current(0)
         self.f_role.grid(row=2, column=1, sticky="we", pady=5)
         self.f_pw = _entry(g, "임시 비밀번호", 3, width=20)
@@ -181,7 +175,7 @@ class AccountsPage(tk.Frame):
             if u.must_change:
                 state += " · 변경 대기"
             self.tree.insert("", "end", iid=str(u.id),
-                             values=(u.username, u.display_name, S.ROLE_LABEL[u.role], state))
+                             values=(u.username, u.display_name, u.label, state))
 
     def _do(self, fn):
         try:
@@ -198,7 +192,7 @@ class AccountsPage(tk.Frame):
         self.f_pw.insert(0, S.gen_temp_password())
 
     def create(self):
-        role = "worker" if self.f_role.current() == 0 else "manager"
+        role = self._roles[self.f_role.current()][0]
         pw = self.f_pw.get()
         user = self.f_user.get()
         if self._do(lambda: self.app.store.create_user(self.app.user, user, self.f_name.get(),
@@ -242,23 +236,44 @@ class AccountsPage(tk.Frame):
 
 
 class EventsPage(tk.Frame):
-    """마스터 전용: 로그인·계정 기록 조회와 기록 무결성 확인."""
+    """마스터 전용: 로그인·계정 변경·작업 기록 조회, 무결성 확인, CSV 내보내기."""
 
     def __init__(self, parent, app):
         super().__init__(parent, bg=BG)
         self.app = app
-        card = Card(self, "로그인·계정 기록")
+        card = Card(self, "기록")
         card.pack(fill="both", expand=True)
         top = tk.Frame(card.body, bg=WHITE)
         top.pack(fill="x", pady=(0, 8))
+        tk.Label(top, text="보기", bg=WHITE, fg=MUTED, font=(FONT, 9)).pack(side="left")
+        self.group = ttk.Combobox(top, state="readonly", width=10, values=list(S.EVENT_GROUPS))
+        self.group.current(0)
+        self.group.pack(side="left", padx=(6, 10))
+        self.group.bind("<<ComboboxSelected>>", lambda e: self.refresh())
         ttk.Button(top, text="새로고침", style="Ghost.TButton", command=self.refresh).pack(
             side="left")
         ttk.Button(top, text="기록 무결성 확인", style="Ghost.TButton",
                    command=self.verify).pack(side="left", padx=8)
+        exp = tk.Frame(card.body, bg=WHITE)
+        exp.pack(fill="x", pady=(0, 8))
+        tk.Label(exp, text="CSV 기간", bg=WHITE, fg=MUTED, font=(FONT, 9)).pack(side="left")
+        self.since = ttk.Entry(exp, width=11)
+        self.until = ttk.Entry(exp, width=11)
+        self.since.pack(side="left", padx=(6, 4))
+        tk.Label(exp, text="~", bg=WHITE, fg=MUTED).pack(side="left")
+        self.until.pack(side="left", padx=4)
+        tk.Label(exp, text="(YYYY-MM-DD, 비우면 전체)", bg=WHITE, fg=MUTED,
+                 font=(FONT, 8)).pack(side="left", padx=(2, 12))
+        ttk.Button(exp, text="작업 로그 CSV", style="Ghost.TButton",
+                   command=self.export_work).pack(side="left")
+        ttk.Button(exp, text="계정 변경 CSV", style="Ghost.TButton",
+                   command=lambda: self.export_events("계정 변경")).pack(side="left", padx=8)
+        ttk.Button(exp, text="로그인 CSV", style="Ghost.TButton",
+                   command=lambda: self.export_events("로그인")).pack(side="left")
         self.tree = ttk.Treeview(card.body, columns=("ts", "type", "actor", "detail"),
                                  show="headings", height=14)
-        for c, t, w in (("ts", "시각", 150), ("type", "종류", 120), ("actor", "계정", 120),
-                        ("detail", "내용", 420)):
+        for c, t, w in (("ts", "시각", 140), ("type", "종류", 130), ("actor", "계정", 110),
+                        ("detail", "내용", 520)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w)
         self.tree.pack(fill="both", expand=True)
@@ -266,10 +281,47 @@ class EventsPage(tk.Frame):
 
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        for e in self.app.store.events(self.app.user):
+        for e in self.app.store.events(self.app.user, group=self.group.get()):
             self.tree.insert("", "end", values=(e["ts"].replace("T", " "),
-                                                EVENT_LABEL.get(e["type"], e["type"]),
-                                                e["actor"], e["detail"]))
+                                                S.EVENT_LABEL.get(e["type"], e["type"]),
+                                                e["actor"], S.format_detail(e["detail"], e["type"])))
+
+    def _dates(self):
+        out = []
+        for e in (self.since, self.until):
+            v = e.get().strip()
+            if v:
+                try:
+                    datetime.date.fromisoformat(v)
+                except ValueError:
+                    messagebox.showwarning("기간", "날짜는 YYYY-MM-DD 형식으로 입력하세요")
+                    return None
+            out.append(v or None)
+        return out
+
+    def _export(self, default_name, fn):
+        d = self._dates()
+        if d is None:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=default_name,
+                                            filetypes=[("CSV 파일", "*.csv")])
+        if not path:
+            return
+        try:
+            n = fn(path, *d)
+        except (S.AuthError, OSError) as e:
+            messagebox.showerror("내보내기", str(e))
+            return
+        messagebox.showinfo("내보내기", "%d건을 저장했습니다\n%s" % (n, path))
+        self.refresh()
+
+    def export_work(self):
+        self._export("작업로그.csv", lambda p, a, b: self.app.store.export_work_csv(
+            self.app.user, p, a, b))
+
+    def export_events(self, group):
+        self._export("%s기록.csv" % group.replace(" ", ""),
+                     lambda p, a, b: self.app.store.export_event_csv(self.app.user, p, group, a, b))
 
     def verify(self):
         try:

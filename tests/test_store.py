@@ -1,3 +1,5 @@
+import csv
+import json
 import os
 import sqlite3
 import sys
@@ -72,9 +74,7 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(S.AuthError):
             self.s.delete_user(fake, self.m.id)
 
-    def test_cannot_create_master_or_reuse_name(self):
-        with self.assertRaises(S.AuthError):
-            self.s.create_user(self.m, "x1x", "x", "master", "Temp12345")
+    def test_cannot_reuse_name(self):
         u = self.mk("kim")
         self.s.delete_user(self.m, u.id)
         with self.assertRaises(S.AuthError):
@@ -185,6 +185,134 @@ class StoreTest(unittest.TestCase):
     def test_temp_password_ok(self):
         for _ in range(50):
             S.check_policy(S.gen_temp_password())
+
+
+class MasterAndWorkLogTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.db = os.path.join(self.dir, "t.db")
+        self.s = S.Store(self.db)
+        self.s.create_first_master("boss", "타스코마스터", "Master1234")
+        self.t = self.s.login("boss", "Master1234")
+        self.s.create_user(self.t, "cust", "거래처마스터", "master", "Cust12345")
+        self.c = self.s.login("cust", "Cust12345")
+        self.s.create_user(self.c, "kim", "김작업", "worker", "Temp12345")
+        self.s.create_user(self.c, "lee", "이관리", "manager", "Temp12345")
+        self.w = self.s.login("kim", "Temp12345")
+        self.g = self.s.login("lee", "Temp12345")
+
+    def ids(self, actor):
+        return {u.username: u.id for u in self.s.list_users(actor)}
+
+    def test_two_masters_and_labels(self):
+        self.assertEqual(self.t.label, "마스터(타스코)")
+        self.assertEqual(self.c.label, "마스터(거래처)")
+        self.assertEqual(self.c.org, "customer")
+
+    def test_only_one_customer_master(self):
+        with self.assertRaises(S.AuthError):
+            self.s.create_user(self.t, "cust2", "또", "master", "Cust12345")
+
+    def test_customer_master_cannot_create_master_or_touch_tasco(self):
+        with self.assertRaises(S.AuthError):
+            self.s.create_user(self.c, "cust2", "또", "master", "Cust12345")
+        ids = self.ids(self.c)
+        for fn in (lambda: self.s.set_active(self.c, ids["boss"], False),
+                   lambda: self.s.delete_user(self.c, ids["boss"]),
+                   lambda: self.s.reset_password(self.c, ids["boss"], "Reset12345"),
+                   lambda: self.s.unlock(self.c, ids["boss"])):
+            with self.assertRaises(S.AuthError):
+                fn()
+        self.assertEqual(self.s.login("boss", "Master1234").username, "boss")
+        # 거부 시도도 기록에 남는다
+        types = [e["type"] for e in self.s.events(self.t)]
+        self.assertGreaterEqual(types.count("permission_denied"), 5)
+
+    def test_tasco_master_manages_customer_master(self):
+        ids = self.ids(self.t)
+        self.s.reset_password(self.t, ids["cust"], "Reset12345")
+        self.assertTrue(self.s.login("cust", "Reset12345").must_change)
+        self.s.set_active(self.t, ids["cust"], False)
+        with self.assertRaises(S.AuthError):
+            self.s.login("cust", "Reset12345")
+        self.s.delete_user(self.t, ids["cust"])
+        self.s.create_user(self.t, "cust3", "새거래처", "master", "Cust12345")   # 삭제 뒤 새로 가능
+
+    def test_customer_master_manages_workers(self):
+        ids = self.ids(self.c)
+        self.s.set_active(self.c, ids["kim"], False)
+        self.s.set_active(self.c, ids["kim"], True)
+        self.s.reset_password(self.c, ids["lee"], "Reset12345")
+
+    def test_master_changes_logged_with_who_and_before_after(self):
+        ids = self.ids(self.t)
+        self.s.set_active(self.t, ids["kim"], False)
+        ev = {e["type"]: json.loads(e["detail"]) for e in self.s.events(self.c)}
+        d = ev["user_deactivated"]
+        self.assertEqual((d["이전"], d["이후"], d["소속"], d["실행자"]),
+                         ("사용", "비활성", "타스코", "타스코마스터"))
+        created = [json.loads(e["detail"]) for e in self.s.events(self.c)
+                   if e["type"] == "user_created"]
+        self.assertTrue(any(x["대상"] == "kim" and x["소속"] == "거래처" for x in created))
+
+    def test_master_lock_auto_releases(self):
+        for _ in range(S.MAX_FAILED):
+            with self.assertRaises(S.AuthError):
+                self.s.login("boss", "wrong")
+        with self.assertRaises(S.AuthError) as e:
+            self.s.login("boss", "Master1234")
+        self.assertIn("뒤 다시", str(e.exception))
+        with sqlite3.connect(self.db) as c:          # 시간이 지난 것으로 만든다
+            c.execute("UPDATE users SET locked_until='2000-01-01T00:00:00' WHERE username='boss'")
+        self.assertEqual(self.s.login("boss", "Master1234").username, "boss")
+
+    def test_work_log_and_csv(self):
+        self.s.log_work("work_retry", self.w, self.g, tries=1, fields=["LOT"], job="JOB-A")
+        self.s.log_work("work_ok", self.w, self.g, job="JOB-A", data="LOT=L1; EXP=20281031")
+        self.s.log_work("work_fail", self.w, None, job="JOB-B", reason="1차 입력 만료")
+        p = os.path.join(self.dir, "work.csv")
+        n = self.s.export_work_csv(self.c, p)
+        self.assertEqual(n, 2)                       # 최종 결과(성공·실패)만
+        rows = list(csv.reader(open(p, encoding="utf-8-sig")))
+        self.assertEqual(rows[0][3], "결과")
+        self.assertEqual((rows[1][3], rows[1][4], rows[1][5]),
+                         ("작업 성공", "김작업(kim)", "이관리(lee)"))
+        self.assertEqual(rows[1][8], "LOT=L1; EXP=20281031")
+        self.assertEqual((rows[2][3], rows[2][5], rows[2][10]), ("작업 실패", "없음", "1차 입력 만료"))
+
+    def test_csv_injection_guard_and_event_csv(self):
+        self.s.log_work("work_ok", self.w, self.g, job="JOB", data="=cmd|' /C calc'!A0")
+        p = os.path.join(self.dir, "w.csv")
+        self.s.export_work_csv(self.t, p)
+        self.assertTrue(list(csv.reader(open(p, encoding="utf-8-sig")))[1][8].startswith("'="))
+        p2 = os.path.join(self.dir, "e.csv")
+        self.assertGreater(self.s.export_event_csv(self.t, p2, "계정 변경"), 0)
+        self.assertIn("타스코마스터", open(p2, encoding="utf-8-sig").read())
+
+    def test_export_and_work_need_valid_actors(self):
+        with self.assertRaises(S.AuthError):
+            self.s.export_work_csv(self.w, os.path.join(self.dir, "x.csv"))
+        with self.assertRaises(S.AuthError):
+            self.s.log_work("work_ok", self.g, self.w)          # 역할이 뒤바뀌면 기록 불가
+
+    def test_work_detail_readable(self):
+        self.s.log_work("work_ok", self.w, self.g, job="JOB-A", kind="갱신 후 인쇄",
+                        data="LOT=L1")
+        e = [x for x in self.s.events(self.t, group="작업")][0]
+        txt = S.format_detail(e["detail"], e["type"])
+        self.assertTrue(txt.startswith("1차 김작업(kim) / 2차 이관리(lee)"))
+        self.assertIn("작업명=JOB-A", txt)
+        self.assertIn("데이터=LOT=L1", txt)
+
+    def test_event_groups_filter(self):
+        work = self.s.events(self.t, group="작업")
+        self.assertEqual(work, [])
+        self.s.log_work("work_request", self.w, job="J")
+        self.assertEqual(len(self.s.events(self.t, group="작업")), 1)
+        self.assertTrue(all(e["type"].startswith("user_") or e["type"] in
+                            ("master_created", "permission_denied", "password_changed",
+                             "password_reset", "account_unlocked", "password_change_fail", "export")
+                            for e in self.s.events(self.t, group="계정 변경")))
 
 
 if __name__ == "__main__":

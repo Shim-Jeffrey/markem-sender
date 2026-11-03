@@ -5,6 +5,7 @@
 """
 import datetime
 import os
+import queue
 import threading
 import time
 import tkinter as tk
@@ -13,6 +14,8 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 
 import auth_ui
+import confirm_ui
+import dual
 import ngpcl
 import store
 
@@ -53,6 +56,10 @@ class App(tk.Tk):
         self.user = None
         self.pages = {}
         self.store = store.Store()
+        self.client = ngpcl.Client()   # 장비 연결은 로그인 사용자가 바뀌어도 유지
+        self.dual = dual.DualEntry()
+        self.conn_host = ""
+        self.conn_text = ""
         self._style()
         self._header()
         self.content = tk.Frame(self, bg=BG)
@@ -61,7 +68,23 @@ class App(tk.Tk):
         for ev in ("<Key>", "<Button>", "<Motion>"):
             self.bind_all(ev, self._touch, add="+")
         self.after(30000, self._idle_check)
+        self._q = queue.Queue()
+        self.after(50, self._drain)
         self.start()
+
+    # 작업 스레드의 결과는 큐로 받아 메인 스레드에서만 화면을 바꾼다(Tk는 스레드에 안전하지 않다)
+    def post(self, fn):
+        self._q.put(fn)
+
+    def _drain(self):
+        try:
+            while True:
+                self._q.get_nowait()()
+        except queue.Empty:
+            pass
+        except Exception as e:   # 화면 갱신 오류가 앱을 멈추지 않게 한다
+            print("화면 갱신 오류:", e)
+        self.after(50, self._drain)
 
     def fit(self, minw, minh):
         """화면 배율(DPI)에 따라 글자가 커져도 잘리지 않도록 내용 크기에 맞춘다."""
@@ -95,9 +118,27 @@ class App(tk.Tk):
         else:
             self.enter_main(user)
 
+    def _expire_pending(self):
+        """10분이 지난 1차 입력을 폐기하고 기록한다."""
+        p = self.dual.discard()
+        if p:
+            try:
+                self.store.log_work("work_fail", p["worker"], None, job=p["request"].job,
+                                    kind=dual.KIND_LABEL[p["request"].kind],
+                                    reason="1차 입력 만료(%d분 안에 2차 확인 없음)" % (dual.EXPIRE_SECONDS // 60))
+            except store.AuthError:
+                pass
+
     def enter_main(self, user):
         self._clear()
         self._set_user(user)
+        if user.role == "manager" and self.dual.has_pending():
+            if self.dual.expired():
+                self._expire_pending()
+            else:
+                confirm_ui.ManagerEntryFrame(self.content, self).pack(fill="both", expand=True)
+                self.fit(1000, 700)
+                return
         if user.role == "master":
             tabs = (("ACC", "계정 관리", auth_ui.AccountsPage), ("EVT", "기록", auth_ui.EventsPage))
         else:
@@ -111,9 +152,6 @@ class App(tk.Tk):
     def logout(self, notice=""):
         if self.user:
             self.store.logout(self.user)
-        tto = self.pages.get("TTO")
-        if tto:
-            tto.client.close()
         self.busy = False
         self.pages = {}
         self.start(notice)
@@ -122,6 +160,8 @@ class App(tk.Tk):
         self._last = time.time()
 
     def _idle_check(self):
+        if self.dual.expired():
+            self._expire_pending()
         if self.user and not self.busy and time.time() - self._last > self.IDLE_SECONDS:
             self.logout("미사용 10분이 지나 자동으로 로그아웃되었습니다")
         self.after(30000, self._idle_check)
@@ -175,8 +215,7 @@ class App(tk.Tk):
 
     def _set_user(self, user):
         if user:
-            self.user_lbl.configure(text="%s  ·  %s" % (user.display_name,
-                                                        store.ROLE_LABEL[user.role]))
+            self.user_lbl.configure(text="%s  ·  %s" % (user.display_name, user.label))
             self.logout_btn.pack(side="right", padx=(0, 6))
             self.user_lbl.pack(side="right", padx=(0, 14))
         else:
@@ -233,7 +272,7 @@ class App(tk.Tk):
                 self.logbox.configure(state="disabled")
             except (AttributeError, tk.TclError):
                 pass  # 로그아웃으로 화면이 바뀐 뒤 도착한 기록
-        self.after(0, put)
+        self.post(put)
 
     def run(self, work, done=None):
         """링크는 한 번에 한 대화만 가능하므로 처리 중에는 새 명령을 받지 않는다."""
@@ -257,7 +296,7 @@ class App(tk.Tk):
                     self.log("ERR", err)
                 elif done:
                     done(res)
-            self.after(0, finish)
+            self.post(finish)
         threading.Thread(target=target, daemon=True).start()
 
 
@@ -267,7 +306,8 @@ class TtoPage(tk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, bg=BG)
         self.app = app
-        self.client = ngpcl.Client()
+        self.client = app.client
+        self.role = app.user.role if app.user else "worker"
         self.columnconfigure(0, weight=0, minsize=330)
         self.columnconfigure(1, weight=1)
         left = tk.Frame(self, bg=BG)
@@ -276,8 +316,15 @@ class TtoPage(tk.Frame):
         right.grid(row=0, column=1, sticky="nsew")
         self._connection(left)
         self._status(left)
-        self._job(right)
-        self._actions(right)
+        if self.role == "worker":
+            self._job(right)
+            self._actions(right)
+        else:
+            self._note(right)
+        if app.conn_host:
+            self.ip.insert(0, app.conn_host)
+        if self.client.connected:
+            self._set_conn(True, app.conn_text)
 
     # ---- 연결 ----
     def _connection(self, parent):
@@ -347,8 +394,12 @@ class TtoPage(tk.Frame):
             self.client.connect(host, port)
             return host, port
         self.app.log("INFO", "연결 시도 %s:%d" % (host, port))
-        self.app.run(work, lambda r: (self._set_conn(True, "연결됨  %s:%d" % r),
-                                      self.app.log("INFO", "연결됨")))
+        def done(r):
+            self.app.conn_host = self.ip.get().strip()
+            self.app.conn_text = "연결됨  %s:%d" % r
+            self._set_conn(True, self.app.conn_text)
+            self.app.log("INFO", "연결됨")
+        self.app.run(work, done)
 
     def disconnect(self):
         self.client.close()
@@ -484,41 +535,51 @@ class TtoPage(tk.Frame):
         return [tuple(self.tree.item(i, "values")) for i in self.tree.get_children()]
 
     # ---- 전송 ----
+    def _note(self, parent):
+        c = Card(parent, "2차 관리자")
+        c.pack(fill="x")
+        tk.Label(c.body, text="대기 중인 1차 작업자의 확인 요청이 없습니다.\n"
+                              "작업자가 입력을 마치면, 관리자가 로그인할 때 확인 입력 화면이 열립니다.",
+                 bg=WHITE, fg=MUTED, font=(FONT, 10), justify="left", anchor="w").pack(fill="x")
+
     def _actions(self, parent):
-        c = Card(parent, "전송")
+        c = Card(parent, "관리자 확인 요청")
         c.pack(fill="x", pady=(14, 0))
         g = c.body
         row = tk.Frame(g, bg=WHITE)
         row.pack(fill="x")
-        ttk.Button(row, text="작업 선택", style="Primary.TButton",
-                   command=lambda: self.send_job("~JS")).pack(side="left")
-        ttk.Button(row, text="필드 갱신", style="Primary.TButton",
-                   command=lambda: self.send_job("~JU")).pack(side="left", padx=8)
-        ttk.Button(row, text="갱신 후 인쇄", style="Primary.TButton",
-                   command=self.update_and_print).pack(side="left")
+        for text, kind in (("작업 선택", "select"), ("필드 갱신", "update"),
+                           ("갱신 후 인쇄", "update_print")):
+            ttk.Button(row, text=text, style="Primary.TButton",
+                       command=lambda k=kind: self.request_confirm(k)).pack(side="left", padx=(0, 8))
         ttk.Button(row, text="인쇄 신호", style="Ghost.TButton",
-                   command=self.print_go).pack(side="left", padx=(18, 0))
-        tk.Label(g, text="갱신 후 인쇄: 필드 갱신 → 인쇄 가능 대기 → 인쇄 (설계서 10장 순서)",
+                   command=self.print_go).pack(side="left", padx=(10, 0))
+        tk.Label(g, text="입력을 마치고 요청하면 로그아웃되고, 2차 관리자가 같은 내용을 입력해 일치할 때만 "
+                         "장비로 전송됩니다 (10분 이내)",
                  bg=WHITE, fg=MUTED, font=(FONT, 8)).pack(anchor="w", pady=(8, 0))
 
-    def _job_message(self, ident):
-        alloc = self.alloc.get().strip() or "0"
-        build = ngpcl.job_select if ident == "~JS" else ngpcl.job_update
-        return build(self.job.get().strip(), alloc, self._fields(), self.v_imaged.get())
-
-    def send_job(self, ident):
+    def request_confirm(self, kind):
+        app = self.app
         if not self._ready():
             return
         try:
-            msg = self._job_message(ident)
-        except ngpcl.NgpclError as e:
+            req = dual.Request(kind, self.job.get(), self.alloc.get(), self._fields(),
+                               self.v_imaged.get())
+        except dual.DualError as e:
             messagebox.showwarning("입력 확인", str(e))
             return
-        wait = 60.0 if self.v_imaged.get() else 10.0
-
-        def work():
-            return self._x(msg, wait)
-        self.app.run(work, lambda r: self._result(ident, r))
+        old = app.dual.submit(app.user, req)
+        if old:   # 이전 요청이 확인 없이 새 요청으로 바뀐 경우
+            try:
+                app.store.log_work("work_fail", old["worker"], None, job=old["request"].job,
+                                   kind=dual.KIND_LABEL[old["request"].kind],
+                                   reason="2차 확인 전에 1차가 새 요청을 입력해 폐기")
+            except store.AuthError:
+                pass
+        app.store.log_work("work_request", app.user, job=req.job, kind=dual.KIND_LABEL[kind])
+        messagebox.showinfo("1차 입력 완료", "입력을 접수했습니다.\n2차 관리자가 로그인해 같은 내용을 "
+                                        "입력하면 전송됩니다 (10분 이내).")
+        app.logout("1차 입력이 접수되었습니다. 2차 관리자가 로그인해 같은 내용을 입력하세요 (10분 이내)")
 
     def _result(self, what, reply):
         if self._ok(reply):
@@ -535,28 +596,6 @@ class TtoPage(tk.Frame):
             return
         self.app.run(lambda: self._x(ngpcl.print_go("", 0, 1), 10.0),
                      lambda r: self._result("인쇄 신호", r))
-
-    def update_and_print(self):
-        if not self._ready():
-            return
-        try:
-            msg = self._job_message("~JU")
-        except ngpcl.NgpclError as e:
-            messagebox.showwarning("입력 확인", str(e))
-            return
-
-        def work():
-            r = self._x(msg, 60.0)
-            if not self._ok(r):
-                raise ngpcl.NgpclError("필드 갱신 실패 — 응답 %s" % r)
-            r = self._x(ngpcl.print_status("", True), 60.0)
-            _, st, f = ngpcl.parse_message(r, self.client.status_on)
-            code = f[0] if f else st
-            if code != "0":
-                raise ngpcl.NgpclError("인쇄할 수 없는 상태입니다 (코드 %s: 1=상태 부적합, 2=인쇄 중, "
-                                       "3=오류)" % code)
-            return self._x(ngpcl.print_go("", 0, 1), 10.0)
-        self.app.run(work, lambda r: self._result("갱신 후 인쇄", r))
 
 
 class CijPage(tk.Frame):
