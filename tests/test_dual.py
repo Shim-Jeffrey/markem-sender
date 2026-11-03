@@ -88,11 +88,15 @@ class DualTest(unittest.TestCase):
         with self.assertRaises(D.DualError):
             self.d.verify(U(3, "worker"), R())
         with self.assertRaises(D.DualError):
-            self.d.verify(U(4, "master"), R())
-        with self.assertRaises(D.DualError):
             self.d.submit(self.m, R())                    # 관리자는 1차 입력 불가
         self.assertTrue(self.d.has_pending())             # 잘못된 시도는 횟수에 안 센다
         self.assertEqual(self.d.tries(), 0)
+
+    def test_master_can_confirm_but_not_submit(self):
+        self.d.submit(self.w, R())
+        self.assertEqual(self.d.verify(U(5, "master"), R()).status, "match")
+        with self.assertRaises(D.DualError):
+            self.d.submit(U(5, "master"), R())            # 1차는 작업자만
 
     def test_new_submit_replaces_and_reports_old(self):
         self.d.submit(self.w, R(job="OLD"))

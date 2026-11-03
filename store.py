@@ -22,7 +22,8 @@ ROLES = ("worker", "manager", "master")
 ROLE_LABEL = {"worker": "1차 작업자", "manager": "2차 관리자", "master": "마스터"}
 ORG_LABEL = {"tasco": "타스코", "customer": "거래처"}
 MAX_FAILED = 5
-MASTER_LOCK_MINUTES = 15          # 마스터는 서로 풀 수 없으므로 잠금이 시간이 지나면 풀린다
+MASTER_LOCK_MINUTES = 15
+SELF_MANAGED_HOURS = 24           # 마스터가 이 시간 안에 만들거나 초기화한 작업자를 직접 승인하면 표시          # 마스터는 서로 풀 수 없으므로 잠금이 시간이 지나면 풀린다
 _USER_RE = re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 _SCRYPT = (2 ** 14, 8, 1)
 GENERIC_FAIL = "아이디 또는 비밀번호가 올바르지 않습니다"
@@ -148,9 +149,19 @@ def format_detail(detail_json: str, typ: str = "") -> str:
     if not isinstance(d, dict):
         return str(d)
     if typ.startswith("work_"):
-        two = "2차 %s(%s)" % (d.get("2차이름", ""), d["2차"]) if d.get("2차", "없음") != "없음"             else "2차 없음"
-        head = ["1차 %s(%s)" % (d.get("1차이름", ""), d.get("1차", "")), two]
-        used = {"결과", "1차", "1차이름", "2차", "2차이름", "1차접속", "2차접속"}
+        if d.get("2차", "없음") != "없음":
+            role = d.get("2차역할", "")
+            tag = role or d.get("2차소속", "")
+            two = "2차 %s(%s%s)" % (d.get("2차이름", ""), d["2차"], ", " + tag if tag else "")
+        else:
+            two = "2차 없음"
+        org1 = d.get("1차소속", "")
+        head = ["1차 %s(%s%s)" % (d.get("1차이름", ""), d.get("1차", ""), ", " + org1 if org1 else ""),
+                two]
+        if d.get("주의"):
+            head.insert(0, "[주의] " + d["주의"])
+        used = {"결과", "1차", "1차이름", "1차소속", "2차", "2차이름", "2차역할", "2차소속", "1차접속",
+                "2차접속", "주의"}
         rest = ["%s=%s" % (k, ", ".join(v) if isinstance(v, list) else v)
                 for k, v in d.items() if k not in used and v not in ("", None, [])]
         return " / ".join(head + rest)
@@ -303,12 +314,20 @@ class Store:
             raise ValueError(typ)
         with self._conn() as c:
             w = self._load(c, worker.id, "worker")
-            m = self._load(c, manager.id, "manager") if manager else None
+            m = self._load(c, manager.id, ("manager", "master")) if manager else None
             d = {"결과": EVENT_LABEL[typ],
                  "1차": w["username"], "1차이름": w["display_name"],
                  "2차": m["username"] if m else "없음", "2차이름": m["display_name"] if m else "",
                  "1차접속": getattr(worker, "login_ts", ""),
                  "2차접속": getattr(manager, "login_ts", "") if manager else ""}
+            d["1차소속"] = ORG_LABEL.get(w["org"], w["org"])
+            if m is not None:
+                d["2차소속"] = ORG_LABEL.get(m["org"], m["org"])
+            if m is not None and m["role"] == "master":    # 마스터가 2차를 맡은 건은 표시해 둔다
+                d["2차역할"] = "마스터(%s)" % ORG_LABEL.get(m["org"], m["org"])
+                if self._recently_managed(c, m["username"], w["username"]):
+                    d["주의"] = ("2차 마스터가 %d시간 안에 이 1차 계정을 만들거나 비밀번호를 초기화함"
+                               % SELF_MANAGED_HOURS)
             names = {"job": "작업명", "kind": "작업종류", "data": "데이터", "reason": "사유",
                      "tries": "불일치횟수", "fields": "불일치필드"}
             for k, v in info.items():
@@ -318,10 +337,24 @@ class Store:
                     d[names[k]] = v
             self._log(c, typ, w["username"], d)
 
+    def _recently_managed(self, c, master_name, worker_name):
+        """마스터가 최근 그 작업자 계정을 만들었거나 비밀번호를 초기화했는지(임시 비밀번호를 앎)."""
+        since = (datetime.datetime.now() - datetime.timedelta(hours=SELF_MANAGED_HOURS)
+                 ).isoformat(timespec="seconds")
+        for r in c.execute("SELECT detail FROM events WHERE actor=? AND ts>=? AND type IN "
+                           "('user_created','password_reset')", (master_name, since)):
+            try:
+                if json.loads(r["detail"]).get("대상") == worker_name:
+                    return True
+            except ValueError:
+                pass
+        return False
+
     @staticmethod
     def _load(c, uid, role):
+        roles = (role,) if isinstance(role, str) else tuple(role)
         r = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        if not r or r["role"] != role:
+        if not r or r["role"] not in roles:
             raise AuthError("계정 정보를 확인할 수 없습니다")
         return r
 
@@ -606,7 +639,8 @@ class Store:
     def export_work_csv(self, actor, path, since=None, until=None):
         """작업 로그(최종 결과만). since/until: 'YYYY-MM-DD' 문자열(포함)."""
         head = ["1차 접속시간", "2차 접속시간", "처리시각", "결과", "1차 담당자", "2차 담당자",
-                "작업명", "작업 종류", "데이터", "불일치 횟수", "실패 사유"]
+                "작업명", "작업 종류", "데이터", "불일치 횟수", "실패 사유", "1차 소속", "2차 소속",
+                "주의"]
         rows = []
         for e in reversed(self._events_between(actor, ("work_ok", "work_fail"), since, until)):
             d = json.loads(e["detail"])
@@ -614,9 +648,11 @@ class Store:
                          d.get("결과", ""),
                          "%s(%s)" % (d.get("1차이름", ""), d.get("1차", "")),
                          "없음" if d.get("2차", "없음") == "없음"
-                         else "%s(%s)" % (d.get("2차이름", ""), d.get("2차", "")),
+                         else "%s(%s%s)" % (d.get("2차이름", ""), d.get("2차", ""),
+                                            ", " + d["2차역할"] if d.get("2차역할") else ""),
                          d.get("작업명", ""), d.get("작업종류", ""), d.get("데이터", ""),
-                         d.get("불일치횟수", ""), d.get("사유", "")])
+                         d.get("불일치횟수", ""), d.get("사유", ""), d.get("1차소속", ""),
+                         d.get("2차소속", ""), d.get("주의", "")])
         return self._write_csv(actor, path, head, rows, "작업 로그")
 
     def export_event_csv(self, actor, path, group="계정 변경", since=None, until=None):

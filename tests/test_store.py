@@ -300,7 +300,7 @@ class MasterAndWorkLogTest(unittest.TestCase):
                         data="LOT=L1")
         e = [x for x in self.s.events(self.t, group="작업")][0]
         txt = S.format_detail(e["detail"], e["type"])
-        self.assertTrue(txt.startswith("1차 김작업(kim) / 2차 이관리(lee)"))
+        self.assertTrue(txt.startswith("1차 김작업(kim, 거래처) / 2차 이관리(lee, 거래처)"), txt)
         self.assertIn("작업명=JOB-A", txt)
         self.assertIn("데이터=LOT=L1", txt)
 
@@ -336,6 +336,36 @@ class MasterAndWorkLogTest(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 c.execute("INSERT INTO users(username,display_name,role,pw_hash,created_at,org)"
                           " VALUES('c2','x','master','h','2026-01-01','customer')")
+
+    def test_master_as_second_is_marked(self):
+        self.s.log_work("work_ok", self.w, self.t, job="JOB-M", data="LOT=1")
+        e = self.s.events(self.t, group="작업")[0]
+        txt = S.format_detail(e["detail"], e["type"])
+        self.assertIn("2차 타스코마스터(boss, 마스터(타스코))", txt)
+        self.assertNotIn("[주의]", txt)      # kim 은 거래처 마스터가 만든 계정
+        p = os.path.join(self.dir, "m.csv")
+        self.s.export_work_csv(self.t, p)
+        with open(p, encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        self.assertEqual(rows[1][5], "타스코마스터(boss, 마스터(타스코))")
+
+    def test_self_managed_approval_flagged(self):
+        self.s.create_user(self.t, "tw2", "타스코작업자", "worker", "Temp12345")
+        tw = self.s.login("tw2", "Temp12345")
+        self.s.log_work("work_ok", tw, self.t, job="J", data="A=1")
+        e = self.s.events(self.t, group="작업")[0]
+        self.assertTrue(S.format_detail(e["detail"], e["type"]).startswith("[주의]"))
+        p = os.path.join(self.dir, "f.csv")
+        self.s.export_work_csv(self.t, p)
+        with open(p, encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        self.assertEqual(rows[0][11:], ["1차 소속", "2차 소속", "주의"])
+        self.assertEqual(rows[-1][11:13], ["타스코", "타스코"])
+        self.assertIn("초기화", rows[-1][13])
+        # 거래처 마스터가 같은 작업자를 승인하면 표시 없음(만들지도 초기화하지도 않음)
+        self.s.log_work("work_ok", tw, self.c, job="J2")
+        e = self.s.events(self.t, group="작업")[0]
+        self.assertNotIn("[주의]", S.format_detail(e["detail"], e["type"]))
 
     def test_event_groups_filter(self):
         work = self.s.events(self.t, group="작업")

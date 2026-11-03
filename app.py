@@ -132,22 +132,31 @@ class App(tk.Tk):
     def enter_main(self, user):
         self._clear()
         self._set_user(user)
+        if self.dual.expired():
+            self._expire_pending()
         if user.role == "manager" and self.dual.has_pending():
-            if self.dual.expired():
-                self._expire_pending()
-            else:
-                confirm_ui.ManagerEntryFrame(self.content, self).pack(fill="both", expand=True)
-                self.fit(1000, 700)
-                return
+            self.open_confirm()    # 관리자는 대기 중인 요청이 있으면 바로 확인 화면
+            return
+        tabs = [("TTO", "TTO  열전사", TtoPage), ("CIJ", "CIJ  잉크젯", CijPage)]
         if user.role == "master":
-            tabs = (("ACC", "계정 관리", auth_ui.AccountsPage), ("EVT", "기록", auth_ui.EventsPage))
-        else:
-            tabs = (("TTO", "TTO  열전사", TtoPage), ("CIJ", "CIJ  잉크젯", CijPage))
+            tabs += [("ACC", "계정 관리", auth_ui.AccountsPage), ("EVT", "기록", auth_ui.EventsPage)]
         self._tabs(tabs)
-        if user.role != "master":
-            self._log_panel()
+        self._log_panel()
         self.show(tabs[0][0])
         self.fit(1120, 700)
+
+    def open_confirm(self):
+        """2차 확인 입력 화면(관리자·마스터)."""
+        if self.dual.expired():
+            self._expire_pending()
+        if not self.dual.has_pending():
+            messagebox.showinfo("2차 확인", "대기 중인 1차 요청이 없습니다")
+            self.enter_main(self.user)
+            return
+        self._clear()
+        self._set_user(self.user)
+        confirm_ui.ManagerEntryFrame(self.content, self).pack(fill="both", expand=True)
+        self.fit(1000, 700)
 
     def logout(self, notice=""):
         if self.user:
@@ -549,11 +558,23 @@ class TtoPage(tk.Frame):
 
     # ---- 전송 ----
     def _note(self, parent):
-        c = Card(parent, "2차 관리자")
+        """관리자·마스터 화면: 대기 중인 1차 요청이 있으면 2차 확인 입력으로 들어간다."""
+        c = Card(parent, "2차 확인")
         c.pack(fill="x")
-        tk.Label(c.body, text="대기 중인 1차 작업자의 확인 요청이 없습니다.\n"
-                              "작업자가 입력을 마치면, 관리자가 로그인할 때 확인 입력 화면이 열립니다.",
-                 bg=WHITE, fg=MUTED, font=(FONT, 10), justify="left", anchor="w").pack(fill="x")
+        d = self.app.dual
+        if d.has_pending() and not d.expired():
+            w = d.pending_worker()
+            left = d.seconds_left()
+            tk.Label(c.body, text="대기 중인 1차 요청: %s  ·  %s  ·  남은 시간 %d분 %02d초"
+                                  % (w.display_name, dual.KIND_LABEL[d.pending_kind()],
+                                     left // 60, left % 60),
+                     bg=WHITE, fg=NAVY, font=(FONT, 10, "bold"), anchor="w").pack(fill="x")
+            ttk.Button(c.body, text="2차 확인 입력", style="Primary.TButton",
+                       command=self.app.open_confirm).pack(anchor="w", pady=(10, 0))
+        else:
+            tk.Label(c.body, text="대기 중인 1차 작업자의 확인 요청이 없습니다.\n"
+                                  "작업자가 입력을 마치면 여기서 2차 확인 입력을 할 수 있습니다.",
+                     bg=WHITE, fg=MUTED, font=(FONT, 10), justify="left", anchor="w").pack(fill="x")
 
     def _actions(self, parent):
         c = Card(parent, "관리자 확인 요청")

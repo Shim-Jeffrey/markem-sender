@@ -75,7 +75,9 @@ class ManagerEntryFrame(tk.Frame):
         row.pack(fill="x", pady=(8, 0))
         self.b_ok = ttk.Button(row, text="확인 및 전송", style="Primary.TButton", command=self.submit)
         self.b_ok.pack(side="left")
-        ttk.Button(row, text="취소(로그아웃)", style="Ghost.TButton", command=self.cancel).pack(
+        self.b_cancel = ttk.Button(row, text="취소(로그아웃)" if app.user.role != "master" else "취소",
+                                   style="Ghost.TButton", command=self.cancel)
+        self.b_cancel.pack(
             side="left", padx=8)
         self._tick()
         self.job.focus_set()
@@ -115,7 +117,10 @@ class ManagerEntryFrame(tk.Frame):
 
     # ---- 동작 ----
     def cancel(self):
-        self.app.logout("확인을 취소했습니다. 1차 입력은 남은 시간 동안 유지됩니다")
+        if self.app.user and self.app.user.role == "master":
+            self.app.enter_main(self.app.user)     # 마스터는 원래 화면으로
+        else:
+            self.app.logout("확인을 취소했습니다. 1차 입력은 남은 시간 동안 유지됩니다")
 
     def submit(self):
         app = self.app
@@ -176,6 +181,7 @@ class ManagerEntryFrame(tk.Frame):
     def _send(self, approval, w, m, job, kind, data, mismatches):
         app = self.app
         self.b_ok.configure(state="disabled")
+        self.b_cancel.configure(state="disabled")      # 전송 중에는 화면을 떠나지 못하게
         self.msg.configure(text="일치합니다. 장비로 전송하는 중…", fg=NAVY)
 
         def xchg(message, timeout):

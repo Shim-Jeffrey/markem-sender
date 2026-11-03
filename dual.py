@@ -3,7 +3,7 @@
 규칙(docs/설계-이중입력.md)
 - 2차가 같은 1차 입력에 대해 MAX_TRIES(3)회 틀리면 1차 입력을 폐기한다(1차부터 다시).
 - 1차 입력은 EXPIRE_SECONDS(10분)이 지나면 폐기한다.
-- 작업자와 관리자는 다른 계정이어야 한다.
+- 작업자와 2차(관리자 또는 마스터)는 다른 계정이어야 한다.
 - 장비로 보내는 함수(run)는 일치 판정이 만든 1회용 승인표(Approval) 없이는 실행되지 않는다.
 - 비교는 장비로 나갈 내용 기준: 작업 종류·작업 이름·할당 수·응답 시점·필드(이름순 정렬, 값은 한 글자도
   다르면 불일치). 필드 순서는 NGPCL에서 의미가 없으므로 비교에서 무시한다.
@@ -138,8 +138,8 @@ class DualEntry:
         p = self._p
         if p is None:
             raise DualError("확인할 1차 입력이 없습니다")
-        if manager.role != "manager":
-            raise DualError("2차 확인은 관리자 계정만 할 수 있습니다")
+        if manager.role not in ("manager", "master"):
+            raise DualError("2차 확인은 관리자 또는 마스터 계정만 할 수 있습니다")
         if manager.id == p["worker"].id:
             raise DualError("1차 작업자와 2차 관리자는 서로 다른 계정이어야 합니다")
         if self.expired():
