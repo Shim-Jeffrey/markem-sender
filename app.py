@@ -585,5 +585,23 @@ class CijPage(tk.Frame):
                      anchor="w").pack(fill="x")
 
 
+def _single_instance():
+    """같은 PC에서 프로그램을 두 개 띄우지 못하게 한다(계정·기록 충돌 방지)."""
+    try:
+        import ctypes
+        h = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\TASCO_MarkemSender")
+        if ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+            return None
+        return h
+    except Exception:
+        return True   # Windows가 아니면 검사하지 않는다
+
+
 if __name__ == "__main__":
-    App().mainloop()
+    _lock = _single_instance()
+    if _lock is None:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("이미 실행 중", "프로그램이 이미 실행 중입니다")
+    else:
+        App().mainloop()

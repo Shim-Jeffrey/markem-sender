@@ -41,7 +41,8 @@ class User:
 
 
 def default_data_dir():
-    override = os.environ.get("MARKEM_DATA_DIR")
+    # 개발·시험 전용: 일반 실행에서는 환경변수로 저장 위치를 바꿀 수 없다(빈 DB로 우회 방지)
+    override = os.environ.get("MARKEM_DATA_DIR") if os.environ.get("MARKEM_DEV") == "1" else None
     if override:
         return override
     base = os.environ.get("ProgramData")
@@ -117,6 +118,10 @@ CREATE TABLE IF NOT EXISTS users(
   created_at TEXT NOT NULL,
   deleted_at TEXT
 );
+CREATE TABLE IF NOT EXISTS meta(
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -162,28 +167,46 @@ class Store:
         prev = row["hash"] if row else "0" * 64
         ts = now()
         d = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+        h = self._digest(prev, ts, typ, actor, d)
         c.execute("INSERT INTO events(ts,type,actor,detail,prev_hash,hash) VALUES(?,?,?,?,?,?)",
-                  (ts, typ, actor, d, prev, self._digest(prev, ts, typ, actor, d)))
+                  (ts, typ, actor, d, prev, h))
+        n = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        for k, v in (("head", h), ("count", str(n))):
+            c.execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                      (k, v))
 
     def log_event(self, typ, actor, detail):
         with self._conn() as c:
             self._log(c, typ, actor, detail)
 
-    def events(self, limit=500):
+    def events(self, actor, limit=500):
         with self._conn() as c:
+            self._require_master(c, actor)
             return [dict(r) for r in c.execute(
                 "SELECT ts,type,actor,detail FROM events ORDER BY id DESC LIMIT ?", (limit,))]
 
-    def verify_chain(self):
-        """기록이 중간에 고쳐지거나 지워지지 않았는지 확인. (정상 여부, 깨진 기록 번호)"""
+    def verify_chain(self, actor):
+        """기록이 중간에 고쳐지거나 지워졌는지 확인. (정상 여부, 문제 설명)
+
+        끝부분 삭제도 잡도록 마지막 해시·건수를 별도 기준값(meta)과 대조한다.
+        한계: DB 파일을 쓸 수 있는 사람이 기록과 기준값을 함께 새로 만들면 감지할 수 없다.
+        """
         with self._conn() as c:
-            prev = "0" * 64
+            self._require_master(c, actor)
+            prev, n = "0" * 64, 0
             for r in c.execute("SELECT * FROM events ORDER BY id"):
                 if r["prev_hash"] != prev or r["hash"] != self._digest(
                         r["prev_hash"], r["ts"], r["type"], r["actor"], r["detail"]):
-                    return False, r["id"]
-                prev = r["hash"]
-        return True, None
+                    return False, "%d번 기록부터 변조 또는 삭제" % r["id"]
+                prev, n = r["hash"], n + 1
+            meta = {r["k"]: r["v"] for r in c.execute("SELECT k,v FROM meta")}
+            if "head" not in meta:
+                if n:   # 기준값이 없던 예전 DB: 지금 상태를 기준으로 삼는다
+                    c.execute("INSERT INTO meta(k,v) VALUES('head',?),('count',?)", (prev, str(n)))
+                return True, None
+            if meta["head"] != prev or meta["count"] != str(n):
+                return False, "끝부분 기록이 지워졌거나 기준값과 다릅니다"
+            return True, None
 
     # ---- 조회 ----
 
@@ -199,7 +222,7 @@ class Store:
 
     def _require_master(self, c, actor):
         r = c.execute("SELECT * FROM users WHERE id=?", (actor.id,)).fetchone()
-        if not r or r["role"] != "master" or not r["active"] or r["deleted_at"]:
+        if not r or r["role"] != "master" or not r["active"] or r["deleted_at"] or r["locked"]:
             raise AuthError("마스터 권한이 필요합니다")
         return self._user(r)
 
@@ -243,7 +266,9 @@ class Store:
             usable = r is not None and bool(r["active"]) and not r["deleted_at"]                 and bool(r["pw_hash"])
             ok = verify_password(password or "", r["pw_hash"] if usable else self._dummy)                 and usable
             if not usable:
-                self._log(c, "login_fail", uname, {"reason": "없는 계정 또는 비활성"})
+                known = r is not None
+                self._log(c, "login_fail", uname if known else "(없는 아이디)",
+                          {"reason": "비활성 또는 삭제" if known else "없는 아이디"})
                 err = GENERIC_FAIL
             elif r["locked"]:
                 self._log(c, "login_fail", uname, {"reason": "잠김"})
@@ -270,17 +295,36 @@ class Store:
         self.log_event("logout", user.username, {})
 
     def change_password(self, user, old, new):
+        # 실패 기록이 롤백되지 않도록 예외는 저장이 끝난 뒤에 던진다.
+        err = None
         with self._conn() as c:
             r = c.execute("SELECT * FROM users WHERE id=?", (user.id,)).fetchone()
-            if not r or not r["active"] or r["deleted_at"] or not verify_password(old, r["pw_hash"]):
-                raise AuthError("현재 비밀번호가 올바르지 않습니다")
-            check_policy(new, r["username"])
-            if verify_password(new, r["pw_hash"]):
-                raise AuthError("새 비밀번호는 현재 비밀번호와 달라야 합니다")
-            c.execute("UPDATE users SET pw_hash=?, must_change=0 WHERE id=?",
-                      (hash_password(new), r["id"]))
-            self._log(c, "password_changed", r["username"], {})
-            user.must_change = False
+            if not r or not r["active"] or r["deleted_at"] or r["locked"]:
+                err = "비밀번호를 바꿀 수 없는 계정입니다. 마스터에게 문의하세요"
+            elif not verify_password(old, r["pw_hash"]):
+                failed = r["failed"] + 1
+                lock = 1 if failed >= MAX_FAILED else 0
+                c.execute("UPDATE users SET failed=?, locked=? WHERE id=?", (failed, lock, r["id"]))
+                self._log(c, "password_change_fail", r["username"], {"횟수": failed})
+                if lock:
+                    self._log(c, "account_locked", r["username"], {})
+                    err = "실패 %d회로 계정이 잠겼습니다. 마스터에게 문의하세요" % MAX_FAILED
+                else:
+                    err = "현재 비밀번호가 올바르지 않습니다"
+            else:
+                try:
+                    check_policy(new, r["username"])
+                    if verify_password(new, r["pw_hash"]):
+                        raise AuthError("새 비밀번호는 현재 비밀번호와 달라야 합니다")
+                except AuthError as e:
+                    err = str(e)
+                else:
+                    c.execute("UPDATE users SET pw_hash=?, must_change=0, failed=0 WHERE id=?",
+                              (hash_password(new), r["id"]))
+                    self._log(c, "password_changed", r["username"], {})
+        if err:
+            raise AuthError(err)
+        user.must_change = False
 
     # ---- 계정 관리(마스터 전용) ----
 

@@ -105,18 +105,18 @@ class StoreTest(unittest.TestCase):
 
     def test_chain_ok_and_tamper_detected(self):
         self.mk("kim")
-        self.assertEqual(self.s.verify_chain(), (True, None))
+        self.assertEqual(self.s.verify_chain(self.m), (True, None))
         with sqlite3.connect(self.db) as c:
             c.execute("UPDATE events SET actor='zzz' WHERE id=2")
-        ok, bad = self.s.verify_chain()
+        ok, why = self.s.verify_chain(self.m)
         self.assertFalse(ok)
-        self.assertEqual(bad, 2)
+        self.assertIn("2번", why)
 
     def test_chain_delete_detected(self):
         self.mk("kim")
         with sqlite3.connect(self.db) as c:
             c.execute("DELETE FROM events WHERE id=2")
-        self.assertFalse(self.s.verify_chain()[0])
+        self.assertFalse(self.s.verify_chain(self.m)[0])
 
     def test_sql_injection_username(self):
         with self.assertRaises(S.AuthError):
@@ -124,6 +124,63 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(S.AuthError):
             self.s.create_user(self.m, "a'; DROP TABLE users;--", "x", "worker", "Temp12345")
         self.assertTrue(self.s.has_master())
+
+    def test_tail_truncation_detected(self):
+        self.mk("kim")
+        with sqlite3.connect(self.db) as c:
+            c.execute("DELETE FROM events WHERE id=(SELECT MAX(id) FROM events)")
+        ok, why = self.s.verify_chain(self.m)
+        self.assertFalse(ok)
+        self.assertIn("끝부분", why)
+
+    def test_events_and_verify_need_master(self):
+        w = self.mk("kim")
+        with self.assertRaises(S.AuthError):
+            self.s.events(w)
+        with self.assertRaises(S.AuthError):
+            self.s.verify_chain(w)
+        self.assertTrue(self.s.events(self.m))
+
+    def test_change_password_failures_count_lock_and_log(self):
+        u = self.mk("kim")
+        for _ in range(S.MAX_FAILED):
+            with self.assertRaises(S.AuthError):
+                self.s.change_password(u, "wrong", "NewPass123")
+        with self.assertRaises(S.AuthError):
+            self.s.login("kim", "Temp12345")          # 잠김
+        types = [e["type"] for e in self.s.events(self.m)]
+        self.assertIn("password_change_fail", types)
+        self.assertIn("account_locked", types)
+
+    def test_locked_master_cannot_manage(self):
+        m2 = self.s.login("boss", "Master1234")
+        with sqlite3.connect(self.db) as c:
+            c.execute("UPDATE users SET locked=1 WHERE username='boss'")
+        with self.assertRaises(S.AuthError):
+            self.s.list_users(m2)
+
+    def test_unknown_login_name_masked(self):
+        with self.assertRaises(S.AuthError):
+            self.s.login("Secret-Pass-1234", "x")
+        actors = [e["actor"] for e in self.s.events(self.m)]
+        self.assertNotIn("secret-pass-1234", actors)
+        self.assertIn("(없는 아이디)", actors)
+
+    def test_env_override_ignored_without_dev(self):
+        d = tempfile.mkdtemp()
+        old = {k: os.environ.get(k) for k in ("MARKEM_DATA_DIR", "MARKEM_DEV")}
+        try:
+            os.environ["MARKEM_DATA_DIR"] = d
+            os.environ.pop("MARKEM_DEV", None)
+            self.assertNotEqual(os.path.abspath(S.default_data_dir()), os.path.abspath(d))
+            os.environ["MARKEM_DEV"] = "1"
+            self.assertEqual(S.default_data_dir(), d)
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_temp_password_ok(self):
         for _ in range(50):

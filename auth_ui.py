@@ -11,7 +11,7 @@ EVENT_LABEL = {
     "user_created": "계정 생성", "user_deleted": "계정 삭제",
     "user_activated": "계정 활성화", "user_deactivated": "계정 비활성화",
     "password_changed": "비밀번호 변경", "password_reset": "비밀번호 초기화",
-    "master_created": "마스터 생성",
+    "master_created": "마스터 생성", "password_change_fail": "비밀번호 변경 실패",
 }
 
 
@@ -266,14 +266,18 @@ class EventsPage(tk.Frame):
 
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        for e in self.app.store.events():
+        for e in self.app.store.events(self.app.user):
             self.tree.insert("", "end", values=(e["ts"].replace("T", " "),
                                                 EVENT_LABEL.get(e["type"], e["type"]),
                                                 e["actor"], e["detail"]))
 
     def verify(self):
-        ok, bad = self.app.store.verify_chain()
+        try:
+            ok, why = self.app.store.verify_chain(self.app.user)
+        except S.AuthError as e:
+            messagebox.showerror("기록 무결성", str(e))
+            return
         if ok:
             messagebox.showinfo("기록 무결성", "이상 없음: 기록이 중간에 고쳐지거나 지워지지 않았습니다")
         else:
-            messagebox.showerror("기록 무결성", "경고: %d번 기록부터 변조 또는 삭제가 감지됐습니다" % bad)
+            messagebox.showerror("기록 무결성", "경고: %s" % why)
