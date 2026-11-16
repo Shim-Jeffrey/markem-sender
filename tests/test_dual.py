@@ -167,5 +167,52 @@ class RunTest(unittest.TestCase):
         self.assertIn("인쇄할 수 없는 상태", why)
 
 
+class SettingKindTest(unittest.TestCase):
+    """설정 변경(~SC)도 이중 입력: 같은 이름·값을 두 사람이 입력해야 승인표가 나온다."""
+
+    def setUp(self):
+        self.d = D.DualEntry(clock=Clock())
+        self.w, self.m = U(1, "worker"), U(2, "manager")
+
+    @staticmethod
+    def S(name="darkness", value="90"):
+        return D.Request("setting", "무시됨", "5", [(name, value)], False)
+
+    def test_message_and_normalised_fields(self):
+        r = self.S()
+        self.assertEqual(r.message(), "~SCdarkness|90|")        # 매뉴얼 5.16 예제
+        self.assertEqual((r.job, r.alloc, r.imaged), ("", "0", True))
+
+    def test_exactly_one_pair(self):
+        with self.assertRaises(D.DualError):
+            D.Request("setting", "", "0", [], True)
+        with self.assertRaises(D.DualError):
+            D.Request("setting", "", "0", [("a", "1"), ("b", "2")], True)
+
+    def test_match_gives_approval(self):
+        self.d.submit(self.w, self.S())
+        r = self.d.verify(self.m, self.S())
+        self.assertEqual(r.status, "match")
+        self.assertEqual(r.approval.consume().kind, "setting")
+
+    def test_name_or_value_mismatch_blocks(self):
+        self.d.submit(self.w, self.S())
+        self.assertEqual(self.d.verify(self.m, self.S(value="91")).status, "retry")
+        self.assertEqual(self.d.verify(self.m, self.S(name="Darkness")).status, "retry")
+        self.assertEqual(self.d.verify(self.m, self.S(value="80")).status, "reset")   # 3회
+
+    def test_run_refuses_setting(self):
+        self.d.submit(self.w, self.S())
+        appr = self.d.verify(self.m, self.S()).approval
+        sent = []
+        ok, why = D.run(None, appr, lambda m, t: sent.append(m) or "~SC0|")
+        self.assertFalse(ok)
+        self.assertEqual(sent, [])          # 전용 경로 밖에서는 장비로 보내지 않는다
+
+    def test_bad_characters_blocked(self):
+        with self.assertRaises(D.DualError):
+            D.Request("setting", "", "0", [("dark|ness", "1")], True)
+
+
 if __name__ == "__main__":
     unittest.main()

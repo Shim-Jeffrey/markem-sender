@@ -2,9 +2,12 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+import device_tools
 import dual
 import ngpcl
 import store as S
+import verify
+import verify_ui
 from app_theme import BG, WHITE, NAVY, MUTED, LINE, ERR, OK, FONT, Card
 
 
@@ -31,8 +34,10 @@ class ManagerEntryFrame(tk.Frame):
                          "(붙여넣기는 막혀 있습니다)", bg=WHITE, fg=MUTED, font=(FONT, 9),
                  anchor="w").pack(fill="x", pady=(4, 12))
 
+        self.is_setting = app.dual.pending_kind() == "setting"
         top = tk.Frame(g, bg=WHITE)
-        top.pack(fill="x")
+        if not self.is_setting:          # 설정 변경은 작업 이름·할당 없이 이름/값 한 쌍만
+            top.pack(fill="x")
         top.columnconfigure(1, weight=1)
         tk.Label(top, text="작업 이름", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
             row=0, column=0, sticky="w", padx=(0, 10))
@@ -44,12 +49,14 @@ class ManagerEntryFrame(tk.Frame):
         self.alloc.insert(0, "0")
         self.alloc.grid(row=0, column=3)
         self.v_imaged = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g, text="이미징이 끝난 뒤 응답 받기", variable=self.v_imaged).pack(
-            anchor="w", pady=(8, 8))
+        if not self.is_setting:
+            ttk.Checkbutton(g, text="이미징이 끝난 뒤 응답 받기", variable=self.v_imaged).pack(
+                anchor="w", pady=(8, 8))
 
-        self.tree = ttk.Treeview(g, columns=("name", "value"), show="headings", height=6)
-        self.tree.heading("name", text="필드 이름")
-        self.tree.heading("value", text="값")
+        self.tree = ttk.Treeview(g, columns=("name", "value"), show="headings",
+                                 height=2 if self.is_setting else 6)
+        self.tree.heading("name", text="설정 이름" if self.is_setting else "필드 이름")
+        self.tree.heading("value", text="설정 값" if self.is_setting else "값")
         self.tree.column("name", width=180)
         self.tree.column("value", width=320)
         self.tree.pack(fill="both", expand=True)
@@ -96,6 +103,9 @@ class ManagerEntryFrame(tk.Frame):
     def add_field(self):
         n, v = self.f_name.get().strip(), self.f_val.get()
         if not n:
+            return
+        if self.is_setting and self.tree.get_children():
+            self.msg.configure(text="설정 변경은 이름과 값 한 쌍만 입력합니다. 먼저 삭제하세요.")
             return
         self.tree.insert("", "end", values=(n, v))
         self.f_name.delete(0, "end")
@@ -176,9 +186,9 @@ class ManagerEntryFrame(tk.Frame):
             messagebox.showwarning("시간 초과", "1차 입력이 만료되었습니다. 1차 작업자부터 다시 입력하세요.")
             app.logout("1차 입력이 만료되었습니다. 1차 작업자부터 다시 입력하세요")
         else:
-            self._send(res.approval, w, m, job, kind, data, res.tries)
+            self._send(res.approval, w, m, job, kind, data, res.tries, pending["request"])
 
-    def _send(self, approval, w, m, job, kind, data, mismatches):
+    def _send(self, approval, w, m, job, kind, data, mismatches, request):
         app = self.app
         self.b_ok.configure(state="disabled")
         self.b_cancel.configure(state="disabled")      # 전송 중에는 화면을 떠나지 못하게
@@ -190,17 +200,84 @@ class ManagerEntryFrame(tk.Frame):
             app.log("RX", got)
             return got
 
-        def done(r):
-            ok, why = r
+        if request.kind == "setting":
+            self._send_setting(approval, w, m, xchg, mismatches, request)
+            return
+
+        def work():
+            r = dual.run(app.client, approval, xchg)
+            checks = None
+            if r[0] and request.fields:     # 전송 성공 → 장비가 받은 값을 되읽어 신호등으로 확인
+                def xchg_rb(message, timeout):
+                    try:
+                        return xchg(message, timeout)
+                    except ngpcl.NgpclError:
+                        app.client.close()   # 늦게 온 응답이 다음 명령과 짝지어지지 않도록 링크를 끊는다
+                        raise
+                checks = verify.read_back(xchg_rb, request.job, request.fields, app.client.status_on)
+            return r, checks
+
+        def done(res):
+            (ok, why), checks = res
             if ok:
+                who = "1차 %s · 2차 %s" % (w.display_name, m.display_name)
                 app.store.log_work_safe("work_ok", w, m, job=job, kind=kind, data=data,
-                                   tries=mismatches or "")
-                messagebox.showinfo("전송 완료", "작업 성공\n1차 %s · 2차 %s" % (w.display_name,
-                                                                         m.display_name))
-                app.logout("작업 성공: %s (1차 %s / 2차 %s)" % (kind, w.display_name, m.display_name))
+                                   tries=mismatches or "", verify=verify.summary(checks))
+                if checks:
+                    verify_ui.show(self, "전송 완료 · 수신 확인", checks, "작업 성공 · " + who)
+                else:
+                    messagebox.showinfo("전송 완료", "작업 성공\n" + who)
+                app.logout("작업 성공: %s (1차 %s / 2차 %s)%s" % (
+                    kind, w.display_name, m.display_name,
+                    " · 수신확인 " + verify.summary(checks) if checks else ""))
             else:
                 app.store.log_work_safe("work_fail", w, m, job=job, kind=kind, data=data,
                                    tries=mismatches or "", reason=why)
                 messagebox.showerror("전송 실패", "작업 실패\n%s\n\n1차 작업자부터 다시 입력해야 합니다." % why)
                 app.logout("작업 실패: %s" % why)
-        app.run(lambda: dual.run(app.client, approval, xchg), done)
+        app.run(work, done)
+
+    def _send_setting(self, approval, w, m, xchg, mismatches, request):
+        """설정 변경(`~SC`): 일치 판정 후 전송하고 `~SR` 로 되읽어 신호등으로 확인한다."""
+        app = self.app
+        req = approval.consume()
+        name, value = req.fields[0]
+        kind, data = dual.KIND_LABEL["setting"], req.data_text()
+        who = "1차 %s · 2차 %s" % (w.display_name, m.display_name)
+
+        def x(message, timeout):
+            try:
+                return xchg(message, timeout)
+            except ngpcl.NgpclError:
+                app.client.close()      # 늦게 온 응답이 다음 명령과 짝지어지지 않도록 링크를 끊는다
+                raise
+
+        def work():
+            try:
+                return device_tools.set_setting(x, name, value, app.client.status_on)
+            except (device_tools.ToolError, ngpcl.NgpclError) as e:
+                return False, str(e), "", "", verify.RED
+
+        def done(r):
+            ok, note, before, after, light = r
+            change = "이전 %s → 이후 %s" % (before or "?", after or "?")
+            if ok and light != verify.RED:
+                app.store.log_work_safe("work_ok", w, m, kind=kind, data=data,
+                                        tries=mismatches or "",
+                                        verify="%s: %s" % (verify.SUMMARY[light], change))
+                chk = [verify.Check(name, value, after, light, note if light != verify.GREEN
+                                    else change)]
+                verify_ui.show(self, "설정 변경 완료 · 수신 확인", chk, "작업 성공 · " + who)
+                app.logout("작업 성공: %s %s (%s / %s)" % (kind, data, who, change))
+            else:
+                if ok:     # 장비가 받아들였지만 되읽은 값이 다름 → 성공으로 기록하지 않는다
+                    why = "장비가 변경을 받아들였으나 되읽은 값이 다름(%s)" % change
+                else:
+                    why = note if ok is False else "응답 확인 불가: " + note
+                app.store.log_work_safe("work_fail", w, m, kind=kind, data=data,
+                                        tries=mismatches or "", reason=why,
+                                        verify="%s: %s" % (verify.SUMMARY[light], change)
+                                        if ok else "")
+                messagebox.showerror("전송 실패", "작업 실패\n%s\n\n1차 작업자부터 다시 입력해야 합니다." % why)
+                app.logout("작업 실패: %s" % why)
+        app.run(work, done)

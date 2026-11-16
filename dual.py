@@ -15,7 +15,8 @@ import ngpcl
 
 MAX_TRIES = 3
 EXPIRE_SECONDS = 600
-KIND_LABEL = {"select": "작업 선택", "update": "필드 갱신", "update_print": "갱신 후 인쇄"}
+KIND_LABEL = {"select": "작업 선택", "update": "필드 갱신", "update_print": "갱신 후 인쇄",
+              "setting": "설정 변경"}
 
 Result = namedtuple("Result", "status tries left fields approval")
 # status: match(일치, approval 있음) / retry(2차만 다시) / reset(3회 불일치, 1차 폐기) / expired(만료, 폐기)
@@ -29,6 +30,8 @@ class Request:
     def __init__(self, kind, job, alloc, fields, imaged=True):
         if kind not in KIND_LABEL:
             raise DualError("알 수 없는 작업 종류입니다")
+        if kind == "setting":        # 장비 설정 변경(~SC): 작업 이름·할당·응답 시점 없이 이름/값 한 쌍만
+            job, alloc, imaged = "", "0", True
         self.kind = kind
         self.job = (job or "").strip()
         self.alloc = (alloc or "").strip() or "0"
@@ -42,7 +45,9 @@ class Request:
                 raise DualError("같은 필드 이름이 두 번 있습니다: %s" % name)
             seen.add(name)
             flds.append((name, value or ""))
-        if kind != "select" and not flds:
+        if kind == "setting" and len(flds) != 1:
+            raise DualError("설정 이름과 값을 한 쌍만 입력하세요")
+        if kind not in ("select", "setting") and not flds:
             raise DualError("갱신할 필드를 한 개 이상 입력하세요")
         self.fields = flds
         try:   # 구분자 등 장비로 보낼 수 없는 문자를 미리 걸러낸다
@@ -51,6 +56,8 @@ class Request:
             raise DualError(str(e))
 
     def message(self):
+        if self.kind == "setting":
+            return ngpcl.simple("~SC", self.fields[0][0], self.fields[0][1])
         build = ngpcl.job_select if self.kind == "select" else ngpcl.job_update
         return build(self.job, self.alloc, self.fields, self.imaged)
 
@@ -160,6 +167,8 @@ class DualEntry:
 def run(client, approval, xchg):
     """승인표를 소모해 장비로 보낸다. xchg(메시지, 대기초) -> 응답 문자열. (성공 여부, 실패 사유)"""
     req = approval.consume()
+    if req.kind == "setting":       # 설정 변경은 되읽기까지 하는 전용 경로(confirm_ui)로만 실행한다
+        return False, "설정 변경은 이 경로로 실행할 수 없습니다"
     wait = 60.0 if req.imaged else 10.0
 
     def ok(reply):

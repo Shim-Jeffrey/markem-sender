@@ -329,7 +329,7 @@ class Store:
                     d["주의"] = ("2차 마스터가 %d시간 안에 이 1차 계정을 만들거나 비밀번호를 초기화함"
                                % SELF_MANAGED_HOURS)
             names = {"job": "작업명", "kind": "작업종류", "data": "데이터", "reason": "사유",
-                     "tries": "불일치횟수", "fields": "불일치필드"}
+                     "tries": "불일치횟수", "fields": "불일치필드", "verify": "수신확인"}
             for k, v in info.items():
                 if k not in names:
                     raise ValueError(k)
@@ -640,7 +640,7 @@ class Store:
         """작업 로그(최종 결과만). since/until: 'YYYY-MM-DD' 문자열(포함)."""
         head = ["1차 접속시간", "2차 접속시간", "처리시각", "결과", "1차 담당자", "2차 담당자",
                 "작업명", "작업 종류", "데이터", "불일치 횟수", "실패 사유", "1차 소속", "2차 소속",
-                "주의"]
+                "주의", "수신 확인"]
         rows = []
         for e in reversed(self._events_between(actor, ("work_ok", "work_fail"), since, until)):
             d = json.loads(e["detail"])
@@ -652,7 +652,7 @@ class Store:
                                             ", " + d["2차역할"] if d.get("2차역할") else ""),
                          d.get("작업명", ""), d.get("작업종류", ""), d.get("데이터", ""),
                          d.get("불일치횟수", ""), d.get("사유", ""), d.get("1차소속", ""),
-                         d.get("2차소속", ""), d.get("주의", "")])
+                         d.get("2차소속", ""), d.get("주의", ""), d.get("수신확인", "")])
         return self._write_csv(actor, path, head, rows, "작업 로그")
 
     def export_event_csv(self, actor, path, group="계정 변경", since=None, until=None):

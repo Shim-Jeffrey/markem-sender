@@ -349,6 +349,17 @@ class MasterAndWorkLogTest(unittest.TestCase):
             rows = list(csv.reader(f))
         self.assertEqual(rows[1][5], "타스코마스터(boss, 마스터(타스코))")
 
+    def test_verify_summary_logged_and_exported(self):
+        self.s.log_work("work_ok", self.w, self.t, job="J", data="LOT=AAA",
+                        verify="초록(전체 일치)")
+        e = self.s.events(self.t, group="작업")[0]
+        self.assertIn("수신확인=초록(전체 일치)", S.format_detail(e["detail"], e["type"]))
+        p = os.path.join(self.dir, "v.csv")
+        self.s.export_work_csv(self.t, p)
+        with open(p, encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        self.assertEqual(rows[-1][14], "초록(전체 일치)")
+
     def test_self_managed_approval_flagged(self):
         self.s.create_user(self.t, "tw2", "타스코작업자", "worker", "Temp12345")
         tw = self.s.login("tw2", "Temp12345")
@@ -359,7 +370,7 @@ class MasterAndWorkLogTest(unittest.TestCase):
         self.s.export_work_csv(self.t, p)
         with open(p, encoding="utf-8-sig") as f:
             rows = list(csv.reader(f))
-        self.assertEqual(rows[0][11:], ["1차 소속", "2차 소속", "주의"])
+        self.assertEqual(rows[0][11:], ["1차 소속", "2차 소속", "주의", "수신 확인"])
         self.assertEqual(rows[-1][11:13], ["타스코", "타스코"])
         self.assertIn("초기화", rows[-1][13])
         # 거래처 마스터가 같은 작업자를 승인하면 표시 없음(만들지도 초기화하지도 않음)

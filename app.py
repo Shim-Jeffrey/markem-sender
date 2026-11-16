@@ -15,9 +15,12 @@ from PIL import Image, ImageTk
 
 import auth_ui
 import confirm_ui
+import device_tools
 import dual
 import ngpcl
 import store
+import verify
+import verify_ui
 
 try:  # 고해상도 화면에서 글자가 흐려지지 않게
     import ctypes
@@ -343,6 +346,7 @@ class TtoPage(tk.Frame):
             self._actions(right)
         else:
             self._note(right)
+        self._tools(right)
         if app.conn_host:
             self.ip.insert(0, app.conn_host)
         if self.client.connected:
@@ -556,6 +560,129 @@ class TtoPage(tk.Frame):
     def _fields(self):
         return [tuple(self.tree.item(i, "values")) for i in self.tree.get_children()]
 
+    # ---- 필드·설정 도구 ----
+    def _tools(self, parent):
+        c = Card(parent, "필드·설정 조회")
+        c.pack(fill="x", pady=(14, 0))
+        g = c.body
+        g.columnconfigure(1, weight=1)
+        tk.Label(g, text="필드 이름", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
+            row=0, column=0, sticky="w", padx=(0, 10))
+        self.q_field = ttk.Entry(g)
+        self.q_field.grid(row=0, column=1, sticky="we")
+        self.q_field.bind("<Return>", lambda e: self.query_fields())
+        ttk.Button(g, text="필드 조회", style="Ghost.TButton", command=self.query_fields).grid(
+            row=0, column=2, padx=(8, 0))
+        tk.Label(g, text="비우면 현재 작업의 전체 필드", bg=WHITE, fg=MUTED, font=(FONT, 8)).grid(
+            row=1, column=1, sticky="w")
+        self.q_tree = ttk.Treeview(g, columns=("name", "value"), show="headings", height=3)
+        self.q_tree.heading("name", text="필드 이름")
+        self.q_tree.heading("value", text="장비의 현재 값")
+        self.q_tree.column("name", width=170)
+        self.q_tree.column("value", width=300)
+        self.q_tree.grid(row=2, column=0, columnspan=3, sticky="we", pady=(6, 10))
+
+        tk.Label(g, text="설정 이름", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
+            row=3, column=0, sticky="w", padx=(0, 10))
+        self.s_name = ttk.Entry(g)
+        self.s_name.grid(row=3, column=1, sticky="we")
+        ttk.Button(g, text="설정 조회", style="Ghost.TButton", command=self.query_setting).grid(
+            row=3, column=2, padx=(8, 0), pady=2)
+        tk.Label(g, text="설정 값", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
+            row=4, column=0, sticky="w", padx=(0, 10))
+        self.s_value = ttk.Entry(g)
+        self.s_value.grid(row=4, column=1, sticky="we")
+        worker = self.role == "worker"
+        self.b_set = ttk.Button(g, text="설정 변경 요청", style="Primary.TButton",
+                                command=self.request_setting)
+        self.b_set.grid(row=4, column=2, padx=(8, 0), pady=2)
+        if not worker:
+            self.b_set.configure(state="disabled")
+        tk.Label(g, text="설정 변경은 이중 입력: 작업자가 요청 → 관리자가 같은 이름·값을 입력해 일치할 때만 전송"
+                         " · 인쇄 중에는 반영되지 않음" if worker else
+                 "설정 변경은 1차 작업자가 요청하고 관리자가 2차 확인합니다 (조회는 모두 가능)",
+                 bg=WHITE, fg=MUTED, font=(FONT, 8)).grid(row=5, column=0, columnspan=3,
+                                                          sticky="w", pady=(2, 0))
+        res = tk.Frame(g, bg=WHITE)
+        res.grid(row=6, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        self.t_dot = tk.Canvas(res, width=14, height=14, bg=WHITE, highlightthickness=0)
+        self.t_dot_id = self.t_dot.create_oval(1, 1, 13, 13, fill=LINE, outline="")
+        self.t_dot.pack(side="left")
+        self.t_msg = tk.Label(res, text="", bg=WHITE, fg=MUTED, font=(FONT, 9), anchor="w",
+                              justify="left", wraplength=470)
+        self.t_msg.pack(side="left", padx=6, fill="x")
+
+    def _tool_result(self, text, light=None):
+        color = {verify.GREEN: OK, verify.YELLOW: verify_ui.WARN, verify.RED: ERR}.get(light, LINE)
+        self.t_dot.itemconfigure(self.t_dot_id, fill=color)
+        self.t_msg.configure(text=text, fg=TEXT if light else MUTED)
+
+    def _xchg(self):
+        """도구용 전송 함수. 통신 오류가 나면 링크를 끊어, 늦게 온 응답이 다음 명령과 짝지어지지 않게 한다."""
+        def x(m, t):
+            try:
+                return self._x(m, t)
+            except ngpcl.NgpclError:
+                self.client.close()
+                self.app.post(lambda: self._set_conn(False, "연결 끊김(통신 오류) — 다시 연결하세요"))
+                raise
+        return x
+
+    def query_fields(self):
+        if not self._ready():
+            return
+        name, on = self.q_field.get().strip(), self.client.status_on
+        x = self._xchg()
+
+        def work():
+            return device_tools.query_fields(x, "", name, on)
+
+        def done(rows):
+            self.q_tree.delete(*self.q_tree.get_children())
+            for n, v in rows:
+                self.q_tree.insert("", "end", values=(n, v))
+            if rows:
+                self._tool_result("필드 %d개를 조회했습니다" % len(rows), verify.GREEN)
+            else:
+                self._tool_result("장비에서 필드를 찾지 못했습니다(이름·현재 작업 확인)", verify.YELLOW)
+        self.app.run(self._guard(work), done)
+
+    def query_setting(self):
+        if not self._ready():
+            return
+        name, on = self.s_name.get().strip(), self.client.status_on
+        x = self._xchg()
+
+        def work():
+            return device_tools.get_setting(x, name, on)
+
+        def done(v):
+            self.s_value.delete(0, "end")
+            self.s_value.insert(0, v)
+            self._tool_result("설정 %s = %s" % (name, v), verify.GREEN)
+        self.app.run(self._guard(work), done)
+
+    def _guard(self, work):
+        """도구 오류(ToolError)를 화면 문구로 바꿔 보여 준다."""
+        def run():
+            try:
+                return work()
+            except device_tools.ToolError as e:
+                raise ngpcl.NgpclError(str(e))
+        return run
+
+    def request_setting(self):
+        """설정 변경은 이중 입력: 작업자가 이름·값을 입력해 관리자 확인을 요청한다(직접 전송 없음)."""
+        if not self._ready():
+            return
+        try:
+            req = dual.Request("setting", "", "0",
+                               [(self.s_name.get().strip(), self.s_value.get())], True)
+        except dual.DualError as e:
+            messagebox.showwarning("입력 확인", str(e))
+            return
+        self.request_confirm("setting", req)
+
     # ---- 전송 ----
     def _note(self, parent):
         """관리자·마스터 화면: 대기 중인 1차 요청이 있으면 2차 확인 입력으로 들어간다."""
@@ -592,16 +719,20 @@ class TtoPage(tk.Frame):
                          "장비로 전송됩니다 (10분 이내)",
                  bg=WHITE, fg=MUTED, font=(FONT, 8)).pack(anchor="w", pady=(8, 0))
 
-    def request_confirm(self, kind):
+    def request_confirm(self, kind, req=None):
         app = self.app
         if not self._ready():
             return
-        try:
-            req = dual.Request(kind, self.job.get(), self.alloc.get(), self._fields(),
-                               self.v_imaged.get())
-        except dual.DualError as e:
-            messagebox.showwarning("입력 확인", str(e))
+        if app.busy:    # 장비와 통신 중이면 로그아웃·요청을 미룬다(응답이 엇갈리지 않게)
+            messagebox.showinfo("처리 중", "장비와 통신 중입니다. 끝난 뒤 다시 요청하세요.")
             return
+        if req is None:
+            try:
+                req = dual.Request(kind, self.job.get(), self.alloc.get(), self._fields(),
+                                   self.v_imaged.get())
+            except dual.DualError as e:
+                messagebox.showwarning("입력 확인", str(e))
+                return
         old = app.dual.submit(app.user, req)
         if old:   # 이전 요청이 확인 없이 새 요청으로 바뀐 경우
             try:
