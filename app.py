@@ -1,6 +1,6 @@
 """마켐이마지 프린터 데이터 전송 (초안 v0.1) — TASCO
 
-장비 종류별 화면: TTO(열전사, NGPCL) / CIJ(잉크젯, 규격 확인 전).
+장비 화면: TTO(열전사, SmartDate X40/X45 등, NGPCL over TCP 21000)만 지원한다.
 실행: python app.py
 """
 import datetime
@@ -32,6 +32,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 from app_theme import (NAVY, NAVY_HOVER, WHITE, BG, LINE, TEXT, MUTED, OK, ERR, FONT,
                        Card)
+
+
+# 메뉴(탭) 쉬운 설명: 탭 옆에 표시
+TAB_HELP = {
+    "TTO": "프린터에 작업·글자를 보내고, 상태를 보고, 설정을 확인하는 화면입니다.",
+    "ACC": "사용할 사람(작업자·관리자)을 만들고 관리하는 화면입니다. 마스터만 쓸 수 있습니다.",
+    "EVT": "누가 언제 무엇을 했는지 기록을 보는 화면입니다. 마스터만 쓸 수 있습니다.",
+}
 
 
 def visible(s):
@@ -140,7 +148,7 @@ class App(tk.Tk):
         if user.role == "manager" and self.dual.has_pending():
             self.open_confirm()    # 관리자는 대기 중인 요청이 있으면 바로 확인 화면
             return
-        tabs = [("TTO", "TTO  열전사", TtoPage), ("CIJ", "CIJ  잉크젯", CijPage)]
+        tabs = [("TTO", "TTO  열전사", TtoPage)]
         if user.role == "master":
             tabs += [("ACC", "계정 관리", auth_ui.AccountsPage), ("EVT", "기록", auth_ui.EventsPage)]
         self._tabs(tabs)
@@ -160,6 +168,13 @@ class App(tk.Tk):
         self._set_user(self.user)
         confirm_ui.ManagerEntryFrame(self.content, self).pack(fill="both", expand=True)
         self.fit(1000, 700)
+
+    def _manual_logout(self):
+        """[로그아웃] 버튼: 장비와 통신 중에는 막는다(다음 사용자와 응답이 엇갈리지 않게)."""
+        if self.busy:
+            messagebox.showinfo("처리 중", "장비와 통신 중입니다. 끝난 뒤 로그아웃하세요.")
+            return
+        self.logout()
 
     def logout(self, notice=""):
         if self.user:
@@ -230,12 +245,12 @@ class App(tk.Tk):
         tk.Frame(bar, bg="#3C5C8A", width=1).pack(side="left", fill="y", pady=16)
         tk.Label(bar, text="프린터 데이터 전송", bg=NAVY, fg=WHITE,
                  font=(FONT, 13, "bold")).pack(side="left", padx=14)
-        tk.Label(bar, text="초안 v0.2", bg=NAVY, fg="#9DB2D0", font=(FONT, 9)).pack(
+        tk.Label(bar, text="v0.3", bg=NAVY, fg="#9DB2D0", font=(FONT, 9)).pack(
             side="right", padx=(10, 22))
         self.logout_btn = tk.Label(bar, text="로그아웃", bg=NAVY, fg=WHITE, font=(FONT, 9, "bold"),
                                    padx=12, pady=5, cursor="hand2", highlightthickness=1,
                                    highlightbackground="#9DB2D0")
-        self.logout_btn.bind("<Button-1>", lambda e: self.logout())
+        self.logout_btn.bind("<Button-1>", lambda e: self._manual_logout())
         self.user_lbl = tk.Label(bar, text="", bg=NAVY, fg=WHITE, font=(FONT, 10))
 
     def _set_user(self, user):
@@ -262,6 +277,8 @@ class App(tk.Tk):
             b.bind("<Button-1>", lambda e, k=key: self.show(k))
             self.tab_btns[key] = b
             self.pages[key] = cls(host, self)
+        self.tab_help = tk.Label(row, text="", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
+        self.tab_help.pack(side="left", padx=14)
 
     def show(self, key):
         for k, b in self.tab_btns.items():
@@ -269,9 +286,11 @@ class App(tk.Tk):
             b.configure(bg=NAVY if on else WHITE, fg=WHITE if on else NAVY)
             self.pages[k].pack_forget()
         self.pages[key].pack(fill="both", expand=True)
+        self.tab_help.configure(text=TAB_HELP.get(key, ""))
 
     def _log_panel(self):
-        card = Card(self.content, "통신 로그")
+        card = Card(self.content, "통신 로그",
+                    "프린터와 주고받은 내용입니다. 송신=보낸 것, 수신=받은 것. 문제가 생기면 이 내용을 담당자에게 알려 주세요.")
         card.pack(fill="x", padx=22, pady=(8, 18))
         wrap = tk.Frame(card.body, bg=WHITE)
         wrap.pack(fill="both", expand=True)
@@ -354,38 +373,53 @@ class TtoPage(tk.Frame):
 
     # ---- 연결 ----
     def _connection(self, parent):
-        c = Card(parent, "장비 연결")
+        c = Card(parent, "장비 연결",
+                 "프린터의 IP 주소를 넣고 [연결]을 누르세요. 초록 불이 켜지면 연결된 것입니다. 패킷 문자 등은 프린터 설정과 같아야 합니다.")
         c.pack(fill="x")
         g = c.body
         g.columnconfigure(1, weight=1)
         self.ip = field(g, "장비 IP", 0)
         self.port = field(g, "포트", 1, value=str(ngpcl.PORT))
         self.port.configure(state="disabled")  # 설계서: 항상 21000
+        def note(row, text):
+            tk.Label(g, text=text, bg=WHITE, fg=MUTED, font=(FONT, 8), anchor="w", justify="left",
+                     wraplength=290).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
         tk.Label(g, text="패킷 문자", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
             row=2, column=0, sticky="w", pady=4)
         self.charset = ttk.Combobox(g, state="readonly", width=20, values=[
             "Printable  { }  (기본)", "Traditional  STX / ETX"])
         self.charset.current(0)
         self.charset.grid(row=2, column=1, sticky="we", pady=4)
+        note(3, "메시지의 시작·끝을 표시하는 방식입니다. 보통 기본값이면 됩니다. "
+                "프린터가 STX/ETX 방식으로 설정돼 있으면 두 번째를 고르세요.")
         self.v_check = tk.BooleanVar(value=False)
         self.v_status = tk.BooleanVar(value=True)
         self.v_unicode = tk.BooleanVar(value=False)
-        for i, (t, v) in enumerate((("체크필드 사용", self.v_check),
-                                    ("응답 상태 필드 사용(권장)", self.v_status),
-                                    ("유니코드(16비트)", self.v_unicode))):
-            ttk.Checkbutton(g, text=t, variable=v).grid(row=3 + i, column=0, columnspan=2,
-                                                        sticky="w", pady=1)
-        tk.Label(g, text="※ 장비 설정과 같아야 합니다", bg=WHITE, fg=MUTED, font=(FONT, 8)).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        for row, (t, v, d) in zip((4, 6, 8), (
+                ("오류 검사 숫자 사용 (체크필드)", self.v_check,
+                 "보낸 글자가 중간에 깨지지 않았는지 확인하는 검사 숫자를 붙입니다. "
+                 "프린터에서 켜 둔 경우에만 체크하세요. 모르면 끄세요."),
+                ("답장에 성공 여부 붙임 (응답 상태 필드)", self.v_status,
+                 "프린터가 답장 맨 앞에 성공 여부 숫자(0=성공)를 붙이는 방식입니다. "
+                 "프린터 설정과 같게 두세요. 모르면 켜 두세요."),
+                ("모든 글자 지원 (유니코드)", self.v_unicode,
+                 "한글 같은 모든 글자를 보내는 방식입니다. 프린터가 영문·숫자만 쓰는 설정이면 끄세요. "
+                 "프린터 설정과 같아야 합니다."))):
+            ttk.Checkbutton(g, text=t, variable=v).grid(row=row, column=0, columnspan=2,
+                                                        sticky="w", pady=(4, 0))
+            note(row + 1, d)
+        note(10, "※ 모르면 기본값 그대로 [연결]을 누르세요. 연결이 안 되거나 답이 없으면 "
+                 "프린터의 통신 설정과 같은지 확인하세요.")
         btns = tk.Frame(g, bg=WHITE)
-        btns.grid(row=7, column=0, columnspan=2, sticky="we")
+        btns.grid(row=11, column=0, columnspan=2, sticky="we", pady=(4, 0))
         self.b_conn = ttk.Button(btns, text="연결", style="Primary.TButton", command=self.connect)
         self.b_conn.pack(side="left")
         self.b_disc = ttk.Button(btns, text="해제", style="Ghost.TButton", command=self.disconnect,
                                  state="disabled")
         self.b_disc.pack(side="left", padx=8)
         st = tk.Frame(g, bg=WHITE)
-        st.grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        st.grid(row=12, column=0, columnspan=2, sticky="w", pady=(10, 0))
         self.dot = tk.Canvas(st, width=12, height=12, bg=WHITE, highlightthickness=0)
         self.dot_id = self.dot.create_oval(1, 1, 11, 11, fill=LINE, outline="")
         self.dot.pack(side="left")
@@ -434,7 +468,8 @@ class TtoPage(tk.Frame):
 
     # ---- 상태 ----
     def _status(self, parent):
-        c = Card(parent, "장비 상태")
+        c = Card(parent, "장비 상태",
+                 "프린터가 지금 인쇄 중인지, 경고는 없는지 보여줍니다. [상태 새로고침]을 누르면 최신으로 바뀝니다.")
         c.pack(fill="x", pady=(14, 0))
         g = c.body
         g.columnconfigure(1, weight=1)
@@ -496,7 +531,8 @@ class TtoPage(tk.Frame):
 
     # ---- 작업 ----
     def _job(self, parent):
-        c = Card(parent, "작업과 필드 데이터")
+        c = Card(parent, "작업과 필드 데이터",
+                 "프린터에 보낼 작업 이름과 인쇄할 글자(필드)를 적는 곳입니다. 필드 이름은 프린터 이미지의 이름과 똑같이 쓰세요. 작업 이름을 비우면 지금 작업에 적용됩니다.")
         c.pack(fill="both", expand=True)
         g = c.body
         top = tk.Frame(g, bg=WHITE)
@@ -562,7 +598,8 @@ class TtoPage(tk.Frame):
 
     # ---- 필드·설정 도구 ----
     def _tools(self, parent):
-        c = Card(parent, "필드·설정 조회")
+        c = Card(parent, "필드·설정 조회",
+                 "프린터에 지금 들어 있는 글자(필드)와 설정 값을 눈으로 확인합니다. 설정을 바꾸는 것은 관리자 확인(이중 입력)이 필요합니다.")
         c.pack(fill="x", pady=(14, 0))
         g = c.body
         g.columnconfigure(1, weight=1)
@@ -686,7 +723,8 @@ class TtoPage(tk.Frame):
     # ---- 전송 ----
     def _note(self, parent):
         """관리자·마스터 화면: 대기 중인 1차 요청이 있으면 2차 확인 입력으로 들어간다."""
-        c = Card(parent, "2차 확인")
+        c = Card(parent, "2차 확인",
+                 "작업자가 입력을 요청하면 여기서 같은 값을 다시 입력해 확인합니다. 두 값이 같아야 프린터로 전송됩니다.")
         c.pack(fill="x")
         d = self.app.dual
         if d.has_pending() and not d.expired():
@@ -704,7 +742,8 @@ class TtoPage(tk.Frame):
                      bg=WHITE, fg=MUTED, font=(FONT, 10), justify="left", anchor="w").pack(fill="x")
 
     def _actions(self, parent):
-        c = Card(parent, "관리자 확인 요청")
+        c = Card(parent, "관리자 확인 요청",
+                 "작업 선택=작업을 바꿈 · 필드 갱신=글자만 바꿈 · 갱신 후 인쇄=글자를 바꾸고 인쇄 · 인쇄 신호=지금 한 번 인쇄. 누르면 관리자가 같은 값을 입력해 확인합니다. 글자 데이터가 있는 요청은 전송·확인이 끝나면 프린터가 자동으로 작업 시작(인쇄 대기) 상태가 됩니다.")
         c.pack(fill="x", pady=(14, 0))
         g = c.body
         row = tk.Frame(g, bg=WHITE)
@@ -761,32 +800,6 @@ class TtoPage(tk.Frame):
             return
         self.app.run(lambda: self._x(ngpcl.print_go("", 0, 1), 10.0),
                      lambda r: self._result("인쇄 신호", r))
-
-
-class CijPage(tk.Frame):
-    """CIJ(잉크젯): 통신 규격 자료 확인 전. 화면 자리만 잡아 둔다."""
-
-    def __init__(self, parent, app):
-        super().__init__(parent, bg=BG)
-        c = Card(self, "CIJ 장비 연결")
-        c.pack(fill="x")
-        g = c.body
-        g.columnconfigure(1, weight=1)
-        field(g, "장비 IP", 0)
-        field(g, "포트", 1, value="확인 필요")
-        ttk.Button(g, text="연결", style="Primary.TButton", state="disabled").grid(
-            row=2, column=0, sticky="w", pady=(10, 0))
-        n = Card(self, "준비 중")
-        n.pack(fill="x", pady=(14, 0))
-        lines = (
-            "CIJ 장비(9xxx 시리즈)는 TTO의 NGPCL과 통신 규격이 다릅니다.",
-            "받은 자료는 NGPCL(TTO 전용)뿐이라 CIJ 규격 문서를 확인한 뒤 연결합니다.",
-            "",
-            "들어갈 기능(규격 확인 후):  메시지 선택  ·  변수 내용 전송  ·  상태 조회",
-        )
-        for t in lines:
-            tk.Label(n.body, text=t, bg=WHITE, fg=TEXT if t else WHITE, font=(FONT, 10),
-                     anchor="w").pack(fill="x")
 
 
 def _single_instance():

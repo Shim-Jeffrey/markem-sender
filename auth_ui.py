@@ -119,7 +119,8 @@ class AccountsPage(tk.Frame):
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=0, minsize=330)
         self.rowconfigure(0, weight=1)
-        left = Card(self, "계정 목록")
+        left = Card(self, "계정 목록",
+                    "프로그램을 쓰는 사람 목록입니다. 사람을 고른 뒤 아래 버튼으로 비밀번호 초기화·잠금 해제·비활성·삭제를 합니다.")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
         self.tree = ttk.Treeview(left.body, columns=("id", "name", "role", "state"),
                                  show="headings", height=10, selectmode="browse")
@@ -134,7 +135,8 @@ class AccountsPage(tk.Frame):
                           ("잠금 해제", self.unlock), ("삭제", self.delete)):
             ttk.Button(row, text=text, style="Ghost.TButton", command=cmd).pack(side="left",
                                                                                 padx=(0, 8))
-        right = Card(self, "계정 추가")
+        right = Card(self, "계정 추가",
+                     "새로 쓸 사람을 만듭니다. 처음 비밀번호는 임시이며 첫 로그인 때 본인이 바꿉니다. 작업자=입력, 관리자=확인.")
         right.grid(row=0, column=1, sticky="nsew")
         g = right.body
         g.columnconfigure(1, weight=1)
@@ -241,7 +243,8 @@ class EventsPage(tk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, bg=BG)
         self.app = app
-        card = Card(self, "기록")
+        card = Card(self, "기록",
+                    "누가 언제 무엇을 했는지 남은 기록입니다. 종류별로 보고, 엑셀(CSV)로 저장하거나 변조 여부를 확인할 수 있습니다.")
         card.pack(fill="both", expand=True)
         top = tk.Frame(card.body, bg=WHITE)
         top.pack(fill="x", pady=(0, 8))

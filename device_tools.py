@@ -81,3 +81,43 @@ def set_setting(xchg, name, value, status_on=True, timeout=10.0):
         return True, "변경 응답은 성공, 되읽기 실패: %s" % e, before, "", verify.YELLOW
     light, note = verify.judge(value, after)
     return True, note or "변경되었습니다", before, after, light
+
+
+PRODUCING = "06"        # PackML 상태 코드: Producing (ngpcl.PACKML_STATE, 매뉴얼 6장·예제 ~DS …|06|)
+
+
+def _device_state(xchg, status_on, timeout):
+    """`~DR` 로 (생산 중 여부, 상태 코드)를 읽는다."""
+    reply = xchg(ngpcl.simple("~DR", ""), timeout)
+    ident, status, f = ngpcl.parse_message(reply, status_on)
+    if ident != "~DS" or status == "1" or len(f) < 8:
+        raise ToolError("장비 상태 응답을 해석하지 못했습니다: %s" % reply)
+    return f[0] == "1", f[7]
+
+
+def start_producing(xchg, status_on=True, timeout=10.0, tries=5, pause=1.0, sleep=None):
+    """작업 시작: 장비를 Producing(준비·인쇄 대기) 상태로 보낸다(`~ST|06|`) 후 `~DR` 로 확인한다.
+
+    (성공 여부, 설명, 신호)를 돌려준다. 통신 오류는 밖으로 던지지 않는다.
+    이미 생산 중이면(생산 플래그와 상태 코드 06 이 모두 맞을 때) 보내지 않고 성공으로 본다. 상태가 바뀌는 데 시간이 걸릴 수 있어 `tries` 번까지 확인한다.
+    """
+    import time
+    sleep = sleep or time.sleep
+    try:
+        producing, code = _device_state(xchg, status_on, timeout)
+        if producing and code == PRODUCING:
+            return True, "이미 작업 중(Producing) 상태입니다", verify.GREEN
+        reply = xchg(ngpcl.simple("~ST", "", PRODUCING), timeout)
+        if len(reply) < 4 or reply[:3] != "~ST" or reply[3] != "0":
+            return False, "장비가 작업 시작을 거부했습니다(응답 %s)" % reply, verify.RED
+        for i in range(tries):
+            producing, code = _device_state(xchg, status_on, timeout)
+            if producing and code == PRODUCING:
+                return True, "작업 시작됨(Producing)", verify.GREEN
+            if i < tries - 1:
+                sleep(pause)
+        name = ngpcl.PACKML_STATE.get(code, code)
+        return False, "작업 시작 명령은 받았지만 상태가 Producing 으로 바뀌지 않았습니다(현재 %s)" % name, \
+            verify.YELLOW
+    except (ToolError, ngpcl.NgpclError) as e:
+        return False, "작업 시작 확인 실패: %s" % e, verify.RED

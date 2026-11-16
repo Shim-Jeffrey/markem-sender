@@ -32,7 +32,13 @@ class ManagerEntryFrame(tk.Frame):
         self.w_name = w.display_name
         tk.Label(g, text="1차 작업자가 입력한 값을 보지 않고, 원본 자료를 보며 직접 입력하세요. "
                          "(붙여넣기는 막혀 있습니다)", bg=WHITE, fg=MUTED, font=(FONT, 9),
-                 anchor="w").pack(fill="x", pady=(4, 12))
+                 anchor="w").pack(fill="x", pady=(4, 0))
+        if app.dual.pending_kind() != "setting":
+            tk.Label(g, text="※ 같은 값이면 프린터로 전송하고, 되읽기가 모두 초록이면 프린터를 자동으로 "
+                             "작업 시작(인쇄 대기) 상태로 보냅니다.", bg=WHITE, fg=MUTED,
+                     font=(FONT, 9), anchor="w").pack(fill="x", pady=(2, 12))
+        else:
+            tk.Label(g, text="", bg=WHITE).pack(pady=(0, 6))
 
         self.is_setting = app.dual.pending_kind() == "setting"
         top = tk.Frame(g, bg=WHITE)
@@ -146,7 +152,7 @@ class ManagerEntryFrame(tk.Frame):
             app.store.log_work_safe("work_fail", pw, app.user, job=pending["request"].job,
                                     kind=dual.KIND_LABEL[pending["request"].kind],
                                     reason="1차 작업자 계정을 더 이상 쓸 수 없어 폐기")
-            messagebox.showwarning("확인 불가", "1차 작업자 계정을 더 이상 쓸 수 없어 요청이 폐기되었습니다.")
+            verify_ui.show_failure(self, "전송되지 않음", "1차 작업자 계정을 더 이상 쓸 수 없어 요청이 폐기되었습니다")
             app.logout("1차 요청이 폐기되었습니다. 1차 작업자부터 다시 입력하세요")
             return
         try:
@@ -176,14 +182,13 @@ class ManagerEntryFrame(tk.Frame):
             app.store.log_work_safe("work_fail", w, m, job=job, kind=kind, data=data, tries=res.tries,
                                fields=res.fields,
                                reason="2차 입력 %d회 불일치 — 1차 입력 폐기, 1차부터 다시" % res.tries)
-            messagebox.showwarning("입력 불일치",
-                                   "2차 입력이 %d회 일치하지 않았습니다.\n1차 입력이 폐기되었습니다. "
-                                   "1차 작업자가 처음부터 다시 입력해야 합니다." % res.tries)
+            verify_ui.show_failure(self, "전송되지 않음",
+                                   "입력이 %d회 일치하지 않아 1차 입력이 폐기되었습니다" % res.tries)
             app.logout("2차 입력 %d회 불일치로 1차 입력이 폐기되었습니다. 1차 작업자부터 다시 입력하세요"
                        % res.tries)
         elif res.status == "expired":
             app.store.log_work_safe("work_fail", w, m, job=job, kind=kind, reason="1차 입력 만료(10분)")
-            messagebox.showwarning("시간 초과", "1차 입력이 만료되었습니다. 1차 작업자부터 다시 입력하세요.")
+            verify_ui.show_failure(self, "전송되지 않음", "1차 입력이 만료되었습니다(10분 안에 확인 없음)")
             app.logout("1차 입력이 만료되었습니다. 1차 작업자부터 다시 입력하세요")
         else:
             self._send(res.approval, w, m, job, kind, data, res.tries, pending["request"])
@@ -204,36 +209,48 @@ class ManagerEntryFrame(tk.Frame):
             self._send_setting(approval, w, m, xchg, mismatches, request)
             return
 
+        def xchg_rb(message, timeout):
+            try:
+                return xchg(message, timeout)
+            except ngpcl.NgpclError:
+                app.client.close()   # 늦게 온 응답이 다음 명령과 짝지어지지 않도록 링크를 끊는다
+                raise
+
         def work():
             r = dual.run(app.client, approval, xchg)
-            checks = None
+            checks, start = None, None
             if r[0] and request.fields:     # 전송 성공 → 장비가 받은 값을 되읽어 신호등으로 확인
-                def xchg_rb(message, timeout):
-                    try:
-                        return xchg(message, timeout)
-                    except ngpcl.NgpclError:
-                        app.client.close()   # 늦게 온 응답이 다음 명령과 짝지어지지 않도록 링크를 끊는다
-                        raise
                 checks = verify.read_back(xchg_rb, request.job, request.fields, app.client.status_on)
-            return r, checks
+            if r[0]:
+                # 작업 시작: 수신 확인이 초록일 때만(틀린 데이터로 인쇄가 시작되지 않게).
+                # 필드 없이 작업만 선택한 경우는 인쇄될 데이터를 아무도 확인하지 않았으므로 시작하지 않는다.
+                if not request.fields:
+                    start = (False, "필드 없이 작업만 선택해 자동 시작하지 않았습니다 "
+                                    "(인쇄될 데이터를 확인한 뒤 필드 갱신으로 시작하세요)", verify.YELLOW)
+                elif verify.overall(checks) == verify.GREEN:
+                    start = device_tools.start_producing(xchg_rb, app.client.status_on)
+                else:
+                    start = (False, "수신 확인이 초록이 아니어서 작업 시작을 하지 않았습니다", verify.YELLOW)
+            return r, checks, start
 
         def done(res):
-            (ok, why), checks = res
+            (ok, why), checks, start = res
             if ok:
                 who = "1차 %s · 2차 %s" % (w.display_name, m.display_name)
+                rec = " · ".join(x for x in (
+                    verify.summary(checks),
+                    "작업시작 " + ("완료" if start[0] else "안 됨(%s)" % start[1])) if x)
                 app.store.log_work_safe("work_ok", w, m, job=job, kind=kind, data=data,
-                                   tries=mismatches or "", verify=verify.summary(checks))
-                if checks:
-                    verify_ui.show(self, "전송 완료 · 수신 확인", checks, "작업 성공 · " + who)
-                else:
-                    messagebox.showinfo("전송 완료", "작업 성공\n" + who)
-                app.logout("작업 성공: %s (1차 %s / 2차 %s)%s" % (
-                    kind, w.display_name, m.display_name,
-                    " · 수신확인 " + verify.summary(checks) if checks else ""))
+                                   tries=mismatches or "", verify=rec)
+                verify_ui.show(self, "전송 완료 · 수신 확인", checks or [], "작업 성공 · " + who,
+                               start=start)
+                app.logout("작업 성공: %s (1차 %s / 2차 %s) · %s" % (
+                    kind, w.display_name, m.display_name, rec))
             else:
                 app.store.log_work_safe("work_fail", w, m, job=job, kind=kind, data=data,
                                    tries=mismatches or "", reason=why)
-                messagebox.showerror("전송 실패", "작업 실패\n%s\n\n1차 작업자부터 다시 입력해야 합니다." % why)
+                verify_ui.show_failure(self, "전송되지 않음", why, "작업 실패 · 1차 %s · 2차 %s" % (
+                    w.display_name, m.display_name))
                 app.logout("작업 실패: %s" % why)
         app.run(work, done)
 
@@ -278,6 +295,6 @@ class ManagerEntryFrame(tk.Frame):
                                         tries=mismatches or "", reason=why,
                                         verify="%s: %s" % (verify.SUMMARY[light], change)
                                         if ok else "")
-                messagebox.showerror("전송 실패", "작업 실패\n%s\n\n1차 작업자부터 다시 입력해야 합니다." % why)
+                verify_ui.show_failure(self, "전송되지 않음", why, "작업 실패 · " + who)
                 app.logout("작업 실패: %s" % why)
         app.run(work, done)

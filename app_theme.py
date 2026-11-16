@@ -17,9 +17,13 @@ FONT = "Malgun Gothic"
 class Card(tk.Frame):
     """흰 카드: 회색 테두리 + 남색 제목."""
 
-    def __init__(self, parent, title):
+    def __init__(self, parent, title, desc=""):
+        """desc: 이 메뉴가 무엇을 하는 곳인지 한두 줄로 쉽게 설명(운영자 안내)."""
         super().__init__(parent, bg=WHITE, highlightbackground=LINE, highlightthickness=1)
         tk.Label(self, text=title, bg=WHITE, fg=NAVY, font=(FONT, 11, "bold"),
-                 anchor="w").pack(fill="x", padx=16, pady=(12, 6))
+                 anchor="w").pack(fill="x", padx=16, pady=(12, 0 if desc else 6))
+        if desc:
+            tk.Label(self, text=desc, bg=WHITE, fg=MUTED, font=(FONT, 9), anchor="w",
+                     justify="left", wraplength=620).pack(fill="x", padx=16, pady=(2, 8))
         self.body = tk.Frame(self, bg=WHITE)
         self.body.pack(fill="both", expand=True, padx=16, pady=(0, 14))

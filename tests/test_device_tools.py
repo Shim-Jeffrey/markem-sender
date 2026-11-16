@@ -132,6 +132,55 @@ class SettingTest(unittest.TestCase):
             T.set_setting(lambda m, t: "~SC0|", "dark|ness", "1")
 
 
+
+def ds(producing, state):
+    return "~DS0|%d|0|0|1|2|0|000000000|%s|0|" % (producing, state)
+
+
+class StartProducingTest(unittest.TestCase):
+    def run_seq(self, replies):
+        seq = iter(replies)
+        sent = []
+
+        def xchg(msg, timeout):
+            sent.append(msg)
+            return next(seq)
+        r = T.start_producing(xchg, True, tries=3, sleep=lambda s: None)
+        return r, sent
+
+    def test_starts_and_confirms(self):
+        (ok, note, light), sent = self.run_seq([ds(0, "04"), "~ST0|", ds(1, "06")])
+        self.assertEqual((ok, light), (True, V.GREEN))
+        self.assertEqual(sent, ["~DR|", "~ST|06|", "~DR|"])   # 매뉴얼 5.22 형식(작업 이름 없는 단일 헤드)
+
+    def test_already_producing_sends_nothing(self):
+        (ok, note, light), sent = self.run_seq([ds(1, "06")])
+        self.assertTrue(ok)
+        self.assertEqual(sent, ["~DR|"])
+
+    def test_flag_without_producing_code_is_not_trusted(self):
+        # 생산 플래그만 1 이고 상태 코드가 06 이 아니면 이미 시작된 것으로 보지 않고 ~ST 를 보낸다
+        (ok, note, light), sent = self.run_seq([ds(1, "02"), "~ST0|", ds(1, "06")])
+        self.assertTrue(ok)
+        self.assertEqual(sent, ["~DR|", "~ST|06|", "~DR|"])
+
+    def test_rejected_is_red(self):
+        (ok, note, light), sent = self.run_seq([ds(0, "04"), "~ST1|"])
+        self.assertEqual((ok, light), (False, V.RED))
+
+    def test_state_never_changes_is_yellow(self):
+        (ok, note, light), sent = self.run_seq(
+            [ds(0, "04"), "~ST0|", ds(0, "02"), ds(0, "02"), ds(0, "02")])
+        self.assertEqual((ok, light), (False, V.YELLOW))
+        self.assertIn("Producing", note)
+
+    def test_comm_error_is_red_not_exception(self):
+        def xchg(msg, timeout):
+            raise ngpcl.NgpclError("응답 시간 초과(10초)")
+        ok, note, light = T.start_producing(xchg, True, sleep=lambda s: None)
+        self.assertEqual((ok, light), (False, V.RED))
+
+
 class SimulatorEndToEnd(unittest.TestCase):
     def test_fields_and_settings_through_socket(self):
         srv = socket.socket()
