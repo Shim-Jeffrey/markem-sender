@@ -37,11 +37,10 @@ def show(parent, title, checks, who_line="", start=None):
     if who_line:
         tk.Label(txt, text=who_line, bg=WHITE, fg=MUTED, font=(FONT, 9), anchor="w").pack(fill="x")
 
-    tree = ttk.Treeview(box, columns=("light", "name", "sent", "got", "note"), show="headings",
+    tree = ttk.Treeview(box, columns=("light", "name", "sent", "got"), show="headings",
                         height=min(max(len(checks), 2), 10))
-    for key, text, w in (("light", "판정", 100), ("name", "필드 이름", 150),
-                         ("sent", "보낸 값", 170), ("got", "장비가 받은 값", 170),
-                         ("note", "비고", 200)):
+    for key, text, w in (("light", "판정", 130), ("name", "필드이름", 220),
+                         ("sent", "보낸 메세지", 220), ("got", "프린터가 받은 메세지", 220)):
         tree.heading(key, text=text)
         tree.column(key, width=w, anchor="w")
     tree.tag_configure(verify.GREEN, foreground=OK)
@@ -49,9 +48,14 @@ def show(parent, title, checks, who_line="", start=None):
     tree.tag_configure(verify.RED, foreground=ERR)
     for c in checks:
         tree.insert("", "end", tags=(c.light,),
-                    values=("● " + verify.LABEL[c.light], c.name, c.sent, c.got, c.note))
+                    values=("● " + verify.LABEL[c.light], c.name, c.sent, c.got))
     if checks:
         tree.pack(fill="x", padx=16, pady=(8, 4))
+    for c in checks:                  # 긴 안내는 표 밖에서 줄바꿈해 모두 보여 준다
+        if c.note:
+            tk.Label(box, text="· %s: %s" % (c.name, c.note), bg=WHITE,
+                     fg=COLOR.get(c.light, MUTED), font=(FONT, 10), anchor="w", justify="left",
+                     wraplength=780).pack(fill="x", padx=16, pady=(2, 0))
     if start:
         row = tk.Frame(box, bg=WHITE)
         row.pack(fill="x", padx=16, pady=(6, 4))

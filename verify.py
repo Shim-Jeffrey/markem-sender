@@ -53,9 +53,9 @@ def read_back(xchg, job, fields, status_on=True, timeout=10.0):
         if ident == "~NK":
             out.append(Check(name, sent, "", YELLOW, "장비가 조회를 거부함(NAK)"))
         elif ident != "~FC" or status == "1" or len(f) < 2 or not f[0]:
-            out.append(Check(name, sent, "", YELLOW, "장비에서 필드를 찾지 못함(이름 확인)"))
+            out.append(Check(name, sent, "", YELLOW, "프린터에서 이 필드를 찾지 못함 — 필드이름이 프린터 이미지의 이름과 맞는지 확인"))
         elif f[0] != name:
-            out.append(Check(name, sent, f[1], YELLOW, "응답 필드 이름이 다름: %s" % f[0]))
+            out.append(Check(name, sent, f[1], YELLOW, "프린터가 돌려준 필드이름이 다름: %s" % f[0]))
         else:
             light, note = judge(sent, f[1])
             out.append(Check(name, sent, f[1], light, note))

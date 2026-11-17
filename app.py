@@ -305,7 +305,21 @@ class App(tk.Tk):
             self.logbox.tag_configure(tag, foreground=color)
 
     # ---- 공용 ----
+    def _file_log(self, kind, text):
+        """통신 내용을 날짜별 파일로도 남긴다(화면 로그는 로그아웃하면 사라지므로, 문제 분석용)."""
+        try:
+            if not getattr(self, "_log_dir", None):
+                self._log_dir = store.default_data_dir()
+            now = datetime.datetime.now()
+            path = os.path.join(self._log_dir, "comm_%s.log" % now.strftime("%Y-%m-%d"))
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("%s  %-4s %s\n" % (now.strftime("%H:%M:%S"), kind, visible(text)))
+        except Exception:
+            pass     # 로그 파일 문제로 전송을 멈추지 않는다
+
     def log(self, kind, text):
+        self._file_log(kind, text)
+
         def put():
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             arrow = {"TX": "→ 송신", "RX": "← 수신", "ERR": "✕ 오류", "INFO": "· 정보"}[kind]
@@ -532,7 +546,7 @@ class TtoPage(tk.Frame):
     # ---- 작업 ----
     def _job(self, parent):
         c = Card(parent, "작업과 필드 데이터",
-                 "프린터에 보낼 작업 이름과 인쇄할 글자(필드)를 적는 곳입니다. 필드 이름은 프린터 이미지의 이름과 똑같이 쓰세요. 작업 이름을 비우면 지금 작업에 적용됩니다.")
+                 "프린터에 보낼 메세지를 적는 곳입니다. 필드이름은 프린터 이미지에 있는 이름과 똑같이 맞춰야 하고(맞춰야 하는 부분), 보내는 메세지는 인쇄할 글자입니다. 작업 이름을 비우면 지금 작업에 적용됩니다.")
         c.pack(fill="both", expand=True)
         g = c.body
         top = tk.Frame(g, bg=WHITE)
@@ -552,8 +566,8 @@ class TtoPage(tk.Frame):
                  bg=WHITE, fg=MUTED, font=(FONT, 8)).grid(row=1, column=0, columnspan=4,
                                                        sticky="w", pady=(4, 10))
         self.tree = ttk.Treeview(g, columns=("name", "value"), show="headings", height=6)
-        self.tree.heading("name", text="필드 이름")
-        self.tree.heading("value", text="값")
+        self.tree.heading("name", text="필드이름 (맞춰야 하는 부분)")
+        self.tree.heading("value", text="보내는 메세지")
         self.tree.column("name", width=180)
         self.tree.column("value", width=300)
         self.tree.pack(fill="both", expand=True)
@@ -561,15 +575,19 @@ class TtoPage(tk.Frame):
         add.pack(fill="x", pady=(10, 0))
         add.columnconfigure(0, weight=1)
         add.columnconfigure(1, weight=2)
+        tk.Label(add, text="① 필드이름 (맞춰야 하는 부분)", bg=WHITE, fg=NAVY,
+                 font=(FONT, 9, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(add, text="② 보내는 메세지 (인쇄할 글자)", bg=WHITE, fg=NAVY,
+                 font=(FONT, 9, "bold")).grid(row=0, column=1, sticky="w")
         self.f_name = ttk.Entry(add)
         self.f_val = ttk.Entry(add)
-        self.f_name.grid(row=0, column=0, sticky="we", padx=(0, 8))
-        self.f_val.grid(row=0, column=1, sticky="we", padx=(0, 8))
+        self.f_name.grid(row=1, column=0, sticky="we", padx=(0, 8))
+        self.f_val.grid(row=1, column=1, sticky="we", padx=(0, 8))
         self.f_val.bind("<Return>", lambda e: self.add_field())
         ttk.Button(add, text="추가", style="Ghost.TButton", command=self.add_field).grid(
-            row=0, column=2, padx=(0, 6))
+            row=1, column=2, padx=(0, 6))
         ttk.Button(add, text="삭제", style="Ghost.TButton", command=self.del_field).grid(
-            row=0, column=3)
+            row=1, column=3)
         self.v_imaged = tk.BooleanVar(value=True)
         ttk.Checkbutton(g, text="이미징이 끝난 뒤 응답 받기 (권장)",
                         variable=self.v_imaged).pack(anchor="w", pady=(10, 0))
@@ -583,6 +601,11 @@ class TtoPage(tk.Frame):
             ngpcl.clean(v)
         except ngpcl.NgpclError as e:
             messagebox.showwarning("입력 확인", str(e))
+            return
+        if v == "" and not messagebox.askyesno(
+                "값이 비어 있습니다",
+                "필드이름 '%s'의 보내는 메세지가 비어 있습니다.\n\n프린터의 이 필드를 빈 글자로 바꾸게 됩니다.\n"
+                "인쇄할 글자는 ② 보내는 메세지 칸에 입력합니다. 이대로 추가할까요?" % n):
             return
         self.tree.insert("", "end", values=(n, v))
         self.f_name.delete(0, "end")
@@ -603,7 +626,7 @@ class TtoPage(tk.Frame):
         c.pack(fill="x", pady=(14, 0))
         g = c.body
         g.columnconfigure(1, weight=1)
-        tk.Label(g, text="필드 이름", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
+        tk.Label(g, text="필드이름", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
             row=0, column=0, sticky="w", padx=(0, 10))
         self.q_field = ttk.Entry(g)
         self.q_field.grid(row=0, column=1, sticky="we")
@@ -613,8 +636,8 @@ class TtoPage(tk.Frame):
         tk.Label(g, text="비우면 현재 작업의 전체 필드", bg=WHITE, fg=MUTED, font=(FONT, 8)).grid(
             row=1, column=1, sticky="w")
         self.q_tree = ttk.Treeview(g, columns=("name", "value"), show="headings", height=3)
-        self.q_tree.heading("name", text="필드 이름")
-        self.q_tree.heading("value", text="장비의 현재 값")
+        self.q_tree.heading("name", text="필드이름")
+        self.q_tree.heading("value", text="프린터에 들어 있는 메세지")
         self.q_tree.column("name", width=170)
         self.q_tree.column("value", width=300)
         self.q_tree.grid(row=2, column=0, columnspan=3, sticky="we", pady=(6, 10))

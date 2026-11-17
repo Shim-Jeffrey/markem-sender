@@ -61,8 +61,8 @@ class ManagerEntryFrame(tk.Frame):
 
         self.tree = ttk.Treeview(g, columns=("name", "value"), show="headings",
                                  height=2 if self.is_setting else 6)
-        self.tree.heading("name", text="설정 이름" if self.is_setting else "필드 이름")
-        self.tree.heading("value", text="설정 값" if self.is_setting else "값")
+        self.tree.heading("name", text="설정 이름" if self.is_setting else "필드이름 (맞춰야 하는 부분)")
+        self.tree.heading("value", text="설정 값" if self.is_setting else "보내는 메세지")
         self.tree.column("name", width=180)
         self.tree.column("value", width=320)
         self.tree.pack(fill="both", expand=True)
@@ -70,16 +70,20 @@ class ManagerEntryFrame(tk.Frame):
         add.pack(fill="x", pady=(10, 0))
         add.columnconfigure(0, weight=1)
         add.columnconfigure(1, weight=2)
+        tk.Label(add, text="① 설정 이름" if self.is_setting else "① 필드이름 (맞춰야 하는 부분)", bg=WHITE, fg=NAVY,
+                 font=(FONT, 9, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(add, text="② 설정 값" if self.is_setting else "② 보내는 메세지", bg=WHITE,
+                 fg=NAVY, font=(FONT, 9, "bold")).grid(row=0, column=1, sticky="w")
         self.f_name, self.f_val = ttk.Entry(add), ttk.Entry(add)
         for e in (self.job, self.alloc, self.f_name, self.f_val):
             no_paste(e)
-        self.f_name.grid(row=0, column=0, sticky="we", padx=(0, 8))
-        self.f_val.grid(row=0, column=1, sticky="we", padx=(0, 8))
+        self.f_name.grid(row=1, column=0, sticky="we", padx=(0, 8))
+        self.f_val.grid(row=1, column=1, sticky="we", padx=(0, 8))
         self.f_val.bind("<Return>", lambda e: self.add_field())
         ttk.Button(add, text="추가", style="Ghost.TButton", command=self.add_field).grid(
-            row=0, column=2, padx=(0, 6))
+            row=1, column=2, padx=(0, 6))
         ttk.Button(add, text="삭제", style="Ghost.TButton", command=self.del_field).grid(
-            row=0, column=3)
+            row=1, column=3)
 
         self.msg = tk.Label(g, text="", bg=WHITE, fg=ERR, font=(FONT, 10, "bold"), anchor="w",
                             wraplength=700, justify="left")
@@ -112,6 +116,10 @@ class ManagerEntryFrame(tk.Frame):
             return
         if self.is_setting and self.tree.get_children():
             self.msg.configure(text="설정 변경은 이름과 값 한 쌍만 입력합니다. 먼저 삭제하세요.")
+            return
+        if v == "" and not messagebox.askyesno(
+                "보내는 메세지가 비어 있습니다", "'%s'의 보내는 메세지가 비어 있습니다. 이대로 추가할까요?\n"
+                "(메세지는 ② 보내는 메세지 칸에 입력합니다)" % n):
             return
         self.tree.insert("", "end", values=(n, v))
         self.f_name.delete(0, "end")
