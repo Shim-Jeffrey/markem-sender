@@ -164,6 +164,24 @@ class DualEntry:
         return Result("retry", p["tries"], self.max_tries - p["tries"], fields, None)
 
 
+def explain_reply(reply, kind=""):
+    """프린터의 거부 응답(예: `~JS1|`)을 현장에서 알아듣기 쉬운 말로 풀어 준다."""
+    r = (reply or "").strip().strip("{}")
+    ident = r[:3]
+    if ident in ("~JS", "~JU"):
+        what = "작업 선택" if ident == "~JS" else "메세지 갱신"
+        return ("프린터가 %s을(를) 받아들이지 않았습니다. 이렇게 확인해 보세요: "
+                "① 선택한 작업이 프린터에 있는 작업인지 "
+                "② 프린터 이미지에 메세지 칸 text1, text2 … 가 보내는 개수만큼 있는지 "
+                "③ 그 칸이 '직접 입력' 종류인지(고정 글자·자동 날짜 칸은 바꿀 수 없음) "
+                "④ 입력한 글자가 칸의 규칙에 맞는지(날짜 칸은 20281231 처럼 숫자 8자리, 글자 수 제한 등) "
+                "⑤ 프린터가 인쇄 중이거나 오류 상태가 아닌지" % what)
+    if ident == "~NK":
+        return ("프린터가 보낸 내용을 읽지 못했습니다. 연결 옵션(패킷 문자·체크필드·유니코드)이 "
+                "프린터 설정과 같은지 확인하세요")
+    return "프린터가 요청을 거부했습니다. 프린터 화면의 상태·오류 표시를 확인하세요"
+
+
 def run(client, approval, xchg):
     """승인표를 소모해 장비로 보낸다. xchg(메시지, 대기초) -> 응답 문자열. (성공 여부, 실패 사유)"""
     req = approval.consume()
@@ -176,7 +194,7 @@ def run(client, approval, xchg):
     try:
         r = xchg(req.message(), wait)
         if not ok(r):
-            return False, "장비 응답 %s" % r
+            return False, "장비 응답 %s — %s" % (r, explain_reply(r, req.kind))
         if req.kind == "update_print":
             r = xchg(ngpcl.print_status("", True), 60.0)
             _, st, f = ngpcl.parse_message(r, client.status_on)

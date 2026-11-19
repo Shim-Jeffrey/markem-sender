@@ -29,7 +29,10 @@ def judge(sent, got):
         return GREEN, ""
     if _loose(sent) == _loose(got):
         return YELLOW, "대소문자·공백 차이"
-    return RED, "값이 다름"
+    if not _strip(got):
+        return RED, ("프린터가 이 칸을 비어 있다고 답했습니다 — 보낸 글자가 칸에 반영되지 않았습니다. "
+                     "이 칸이 '직접 입력' 종류인지, 입력 규칙(날짜 형식 등)에 맞는 글자인지 확인하세요")
+    return RED, "값이 다름 — 프린터에 들어간 글자가 보낸 글자와 다릅니다"
 
 
 def read_back(xchg, job, fields, status_on=True, timeout=10.0):

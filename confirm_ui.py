@@ -10,7 +10,7 @@ import ngpcl
 import store as S
 import verify
 import verify_ui
-from app_theme import BG, WHITE, NAVY, MUTED, LINE, ERR, OK, FONT, Card
+from app_theme import px, BG, WHITE, NAVY, MUTED, LINE, ERR, OK, FONT, Card
 
 
 def no_paste(widget):
@@ -93,7 +93,7 @@ class ManagerEntryFrame(tk.Frame):
             row=brow, column=c_btn + 1)
 
         self.msg = tk.Label(g, text="", bg=WHITE, fg=ERR, font=(FONT, 10, "bold"), anchor="w",
-                            wraplength=700, justify="left")
+                            wraplength=px(700), justify="left")
         self.msg.pack(fill="x", pady=(12, 0))
         row = tk.Frame(g, bg=WHITE)
         row.pack(fill="x", pady=(8, 0))

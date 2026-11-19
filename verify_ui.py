@@ -4,7 +4,7 @@ from tkinter import ttk
 
 import messages
 import verify
-from app_theme import BG, WHITE, NAVY, MUTED, LINE, OK, ERR, FONT
+from app_theme import px, BG, WHITE, NAVY, MUTED, LINE, OK, ERR, FONT
 
 WARN = "#B7791F"
 COLOR = {verify.GREEN: OK, verify.YELLOW: WARN, verify.RED: ERR}
@@ -56,7 +56,7 @@ def show(parent, title, checks, who_line="", start=None, name_label="번호"):
         if c.note:
             tk.Label(box, text="· %s: %s" % (messages.friendly(c.name), c.note), bg=WHITE,
                      fg=COLOR.get(c.light, MUTED), font=(FONT, 10), anchor="w", justify="left",
-                     wraplength=780).pack(fill="x", padx=16, pady=(2, 0))
+                     wraplength=px(780)).pack(fill="x", padx=16, pady=(2, 0))
     if start:
         row = tk.Frame(box, bg=WHITE)
         row.pack(fill="x", padx=16, pady=(6, 4))
@@ -66,7 +66,7 @@ def show(parent, title, checks, who_line="", start=None, name_label="번호"):
         d2.pack(side="left")
         tk.Label(row, text="작업 시작: " + start[1], bg=WHITE, font=(FONT, 10, "bold"),
                  fg=OK if start[0] else (ERR if start[2] == verify.RED else WARN),
-                 anchor="w", justify="left", wraplength=560).pack(side="left", padx=8)
+                 anchor="w", justify="left", wraplength=px(560)).pack(side="left", padx=8)
     tk.Label(box, text="※ 되읽기로 확인한 것은 장비 작업의 필드 값입니다(실제 인쇄 결과 확인은 아님)",
              bg=WHITE, fg=MUTED, font=(FONT, 8), anchor="w").pack(fill="x", padx=16)
     ttk.Button(box, text="확인", style="Primary.TButton", command=win.destroy).pack(
@@ -101,7 +101,7 @@ def show_failure(parent, title, reason, who_line="", hint="1차 입력부터 다
     if who_line:
         tk.Label(txt, text=who_line, bg=WHITE, fg=MUTED, font=(FONT, 9), anchor="w").pack(fill="x")
     tk.Label(box, text="사유: " + reason, bg=WHITE, fg=ERR, font=(FONT, 10), anchor="w",
-             justify="left", wraplength=440).pack(fill="x", padx=16, pady=(8, 2))
+             justify="left", wraplength=px(440)).pack(fill="x", padx=16, pady=(8, 2))
     if hint:
         tk.Label(box, text=hint, bg=WHITE, fg=MUTED, font=(FONT, 9), anchor="w").pack(
             fill="x", padx=16)
@@ -162,12 +162,12 @@ def show_print_control(parent, title, checks, who_line, on_action):
         if c.note:
             tk.Label(box, text="· %s: %s" % (messages.friendly(c.name), c.note), bg=WHITE,
                      fg=COLOR.get(c.light, MUTED), font=(FONT, 10), anchor="w", justify="left",
-                     wraplength=780).pack(fill="x", padx=16, pady=(2, 0))
+                     wraplength=px(780)).pack(fill="x", padx=16, pady=(2, 0))
 
     status = tk.Label(box, text="인쇄를 시작하려면 [인쇄 시작], 멈추려면 [정지]를 누르세요. "
                       "(3분 안에 선택하지 않으면 창이 닫히고 로그아웃됩니다)",
                       bg=WHITE, fg=MUTED, font=(FONT, 10, "bold"), anchor="w", justify="left",
-                      wraplength=780)
+                      wraplength=px(780))
     status.pack(fill="x", padx=16, pady=(10, 4))
     btns = tk.Frame(box, bg=WHITE)
     btns.pack(pady=(4, 14))

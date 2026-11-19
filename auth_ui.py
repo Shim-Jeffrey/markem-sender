@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 
 import store as S
-from app_theme import (BG, WHITE, NAVY, MUTED, LINE, ERR, TEXT, FONT, Card)
+from app_theme import (px, BG, WHITE, NAVY, MUTED, LINE, ERR, TEXT, FONT, Card)
 
 def _entry(parent, label, row, secret=False, width=28):
     tk.Label(parent, text=label, bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
@@ -27,9 +27,9 @@ class AuthBox(tk.Frame):
         self.form.columnconfigure(1, weight=1)
         if note:
             tk.Label(self.form, text=note, bg=WHITE, fg=MUTED, font=(FONT, 9), justify="left",
-                     wraplength=360).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+                     wraplength=px(360)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.msg = tk.Label(self.form, text="", bg=WHITE, fg=ERR, font=(FONT, 9), anchor="w",
-                            wraplength=360, justify="left")
+                            wraplength=px(360), justify="left")
 
     def finish(self, row, button_text, command, first_entry, last_entry):
         self.msg.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -62,11 +62,11 @@ class LoginDialog(tk.Toplevel):
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
         if notice:
             tk.Label(self, text=notice, bg=WHITE, fg=MUTED, font=(FONT, 9), justify="left",
-                     wraplength=340).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+                     wraplength=px(340)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.user = _entry(self, "아이디", 2, width=26)
         self.pw = _entry(self, "비밀번호", 3, secret=True, width=26)
         self.msg = tk.Label(self, text="", bg=WHITE, fg=ERR, font=(FONT, 9), anchor="w",
-                            wraplength=340, justify="left")
+                            wraplength=px(340), justify="left")
         self.msg.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.btn = ttk.Button(self, text="로그인", style="Primary.TButton", command=self.submit)
         self.btn.grid(row=5, column=0, columnspan=2, sticky="we", pady=(10, 0))
@@ -249,7 +249,7 @@ class AccountsPage(tk.Frame):
                  font=(FONT, 8)).grid(row=5, column=0, columnspan=2, sticky="w")
         ttk.Button(g, text="계정 만들기", style="Primary.TButton", command=self.create).grid(
             row=6, column=0, columnspan=2, sticky="we", pady=(12, 0))
-        self.msg = tk.Label(g, text="", bg=WHITE, fg=ERR, font=(FONT, 9), wraplength=290,
+        self.msg = tk.Label(g, text="", bg=WHITE, fg=ERR, font=(FONT, 9), wraplength=px(290),
                             justify="left", anchor="w")
         self.msg.grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.refresh()

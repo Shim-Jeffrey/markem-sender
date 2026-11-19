@@ -213,6 +213,16 @@ class SettingKindTest(unittest.TestCase):
         with self.assertRaises(D.DualError):
             D.Request("setting", "", "0", [("dark|ness", "1")], True)
 
+class ExplainReplyTest(unittest.TestCase):
+    def test_js_failure_is_explained(self):
+        t = D.explain_reply("~JS1|")
+        self.assertIn("작업 선택", t)
+        self.assertIn("text1", t)
+
+    def test_unknown_still_has_text(self):
+        self.assertIn("거부", D.explain_reply("~XX1|"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

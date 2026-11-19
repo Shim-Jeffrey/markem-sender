@@ -33,7 +33,8 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-from app_theme import (NAVY, NAVY_HOVER, WHITE, BG, LINE, TEXT, MUTED, OK, ERR, FONT,
+import app_theme
+from app_theme import (px, NAVY, NAVY_HOVER, WHITE, BG, LINE, TEXT, MUTED, OK, ERR, FONT,
                        Card)
 
 
@@ -78,7 +79,7 @@ class ExitDialog(tk.Toplevel):
         self.user = auth_ui._entry(self, "마스터 아이디", 1)
         self.pw = auth_ui._entry(self, "비밀번호", 2, secret=True)
         self.msg = tk.Label(self, text="", bg=WHITE, fg=ERR, font=(FONT, 9), anchor="w",
-                            wraplength=320, justify="left")
+                            wraplength=px(320), justify="left")
         self.msg.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
         row = tk.Frame(self, bg=WHITE)
         row.grid(row=4, column=0, columnspan=2, sticky="we", pady=(10, 0))
@@ -127,6 +128,7 @@ class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
+        self._set_scale()
         self.title("TASCO 프린터 데이터 전송")
         self.minsize(720, 520)
         self.configure(bg=BG)
@@ -154,6 +156,19 @@ class App(tk.Tk):
         if KIOSK:
             self._kiosk()
         self.start()
+
+    def _set_scale(self):
+        """전체 화면에서는 화면 해상도에 맞춰 화면 전체 크기를 맞춘다.
+
+        기준: 100% 배율에서 주 화면이 920x1200 픽셀쯤 필요하다. 화면이 그보다 크면 가로·세로 중
+        먼저 닿는 쪽에 맞춰 1.0~1.8배로 키운다(내용이 화면 밖으로 잘리지 않게 한다).
+        """
+        f = 1.0
+        if KIOSK:
+            f = min(self.winfo_screenwidth() / 920.0, self.winfo_screenheight() / 1200.0)
+            f = max(1.0, min(1.8, f))
+            self.tk.call("tk", "scaling", 96.0 / 72.0 * f)    # 화면은 물리 픽셀 기준(DPI 인식)
+        app_theme.SCALE = f
 
     # ---- 전체 화면 잠금: 마스터 비밀번호 없이는 종료·창 전환이 되지 않는다 ----
     def _kiosk(self):
@@ -334,7 +349,7 @@ class App(tk.Tk):
                     padding=(14, 7))
         s.map("Ghost.TButton", background=[("active", BG), ("disabled", WHITE)],
               foreground=[("disabled", MUTED)], bordercolor=[("disabled", LINE)])
-        s.configure("Treeview", background=WHITE, fieldbackground=WHITE, rowheight=26,
+        s.configure("Treeview", background=WHITE, fieldbackground=WHITE, rowheight=px(26),
                     bordercolor=LINE, font=(FONT, 10))
         s.configure("Treeview.Heading", background=BG, foreground=NAVY,
                     font=(FONT, 9, "bold"), relief="flat")
@@ -354,12 +369,12 @@ class App(tk.Tk):
 
     def _header(self):
         self._window_icon()
-        bar = tk.Frame(self, bg=NAVY, height=64)
+        bar = tk.Frame(self, bg=NAVY, height=px(64))
         bar.pack(fill="x")
         bar.pack_propagate(False)
         try:
             img = Image.open(os.path.join(HERE, "assets", "logo_white.png"))
-            h = 26
+            h = px(26)
             img = img.resize((int(img.width * h / img.height), h), Image.LANCZOS)
             self._logo = ImageTk.PhotoImage(img)
             tk.Label(bar, image=self._logo, bg=NAVY).pack(side="left", padx=(22, 14))
@@ -525,7 +540,7 @@ class TtoPage(tk.Frame):
         self.port.configure(state="disabled")  # 설계서: 항상 21000
         def note(row, text):
             tk.Label(g, text=text, bg=WHITE, fg=MUTED, font=(FONT, 8), anchor="w", justify="left",
-                     wraplength=290).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                     wraplength=px(290)).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
         tk.Label(g, text="패킷 문자", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
             row=2, column=0, sticky="w", pady=4)
@@ -783,7 +798,7 @@ class TtoPage(tk.Frame):
         self.t_dot_id = self.t_dot.create_oval(1, 1, 13, 13, fill=LINE, outline="")
         self.t_dot.pack(side="left")
         self.t_msg = tk.Label(res, text="", bg=WHITE, fg=MUTED, font=(FONT, 9), anchor="w",
-                              justify="left", wraplength=470)
+                              justify="left", wraplength=px(470))
         self.t_msg.pack(side="left", padx=6, fill="x")
 
     def _tool_result(self, text, light=None):

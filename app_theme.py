@@ -24,6 +24,14 @@ class Card(tk.Frame):
                  anchor="w").pack(fill="x", padx=16, pady=(12, 0 if desc else 6))
         if desc:
             tk.Label(self, text=desc, bg=WHITE, fg=MUTED, font=(FONT, 9), anchor="w",
-                     justify="left", wraplength=620).pack(fill="x", padx=16, pady=(2, 8))
+                     justify="left", wraplength=px(620)).pack(fill="x", padx=16, pady=(2, 8))
         self.body = tk.Frame(self, bg=WHITE)
         self.body.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+
+SCALE = 1.0      # 화면 크기에 맞춘 확대 배율(App 이 시작할 때 정한다)
+
+
+def px(n):
+    """픽셀로 정한 크기(줄바꿈 폭·행 높이 등)를 화면 배율에 맞춘다."""
+    return int(round(n * SCALE))

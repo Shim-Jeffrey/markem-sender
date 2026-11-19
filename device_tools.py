@@ -127,7 +127,7 @@ def start_producing(xchg, status_on=True, timeout=10.0, tries=5, pause=1.0, slee
         if code in HELD:      # 정지 상태: Ready 로 먼저 복귀
             reply = xchg(ngpcl.simple("~ST", "", READY), timeout)
             if len(reply) < 4 or reply[:3] != "~ST" or reply[3] != "0":
-                return False, "장비가 준비(Ready) 전환을 거부했습니다(응답 %s)" % reply, verify.RED
+                return False, "장비가 준비(Ready) 전환을 거부했습니다(응답 %s). 프린터 화면의 상태를 확인하세요" % reply, verify.RED
             producing, code = _wait_state(xchg, status_on, timeout, tries, pause, sleep, (READY, PRODUCING))
             if code not in (READY, PRODUCING):
                 name = ngpcl.PACKML_STATE.get(code, code)
@@ -136,7 +136,7 @@ def start_producing(xchg, status_on=True, timeout=10.0, tries=5, pause=1.0, slee
                 return True, "작업 시작됨(Producing)", verify.GREEN
         reply = xchg(ngpcl.simple("~ST", "", PRODUCING), timeout)
         if len(reply) < 4 or reply[:3] != "~ST" or reply[3] != "0":
-            return False, "장비가 작업 시작을 거부했습니다(응답 %s)" % reply, verify.RED
+            return False, "장비가 작업 시작을 거부했습니다(응답 %s). 프린터가 오류·경고 상태이거나 지금 시작할 수 없는 상태일 수 있습니다. 프린터 화면을 확인하세요" % reply, verify.RED
         producing, code = _wait_state(xchg, status_on, timeout, tries, pause, sleep, (PRODUCING,))
         if producing and code == PRODUCING:
             return True, "작업 시작됨(Producing)", verify.GREEN
@@ -163,7 +163,7 @@ def stop_printing(xchg, status_on=True, timeout=10.0, tries=5, pause=1.0, sleep=
             return True, "이미 정지 상태입니다", verify.GREEN
         reply = xchg(ngpcl.simple("~ST", "", STOP_TARGET), timeout)
         if len(reply) < 4 or reply[:3] != "~ST" or reply[3] != "0":
-            return False, "장비가 정지 명령을 거부했습니다(응답 %s)" % reply, verify.RED
+            return False, "장비가 정지 명령을 거부했습니다(응답 %s). 프린터 화면의 상태를 확인하세요" % reply, verify.RED
         for i in range(tries):
             producing, code = _device_state(xchg, status_on, timeout)
             if code in HELD:
