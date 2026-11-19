@@ -78,3 +78,18 @@ def summary(checks):
     bad = ["%s(%s)" % (c.name, LABEL[c.light]) for c in checks if c.light != GREEN]
     text = SUMMARY[overall(checks)]
     return text + (": " + ", ".join(bad) if bad else "")
+
+
+def extra_field_checks(rows, sent_count):
+    """프린터에 있는 메세지 칸 중 이번에 보내지 않은 text칸(번호가 더 큰 것)을 노랑으로 알린다.
+
+    rows: [(필드이름, 값)] (`~FR` 전체 조회 결과). 이전 값이 남은 채 인쇄될 수 있기 때문이다.
+    """
+    import messages
+    out = []
+    for name, value in rows:
+        if (name.startswith(messages.PREFIX) and name[len(messages.PREFIX):].isdigit()
+                and int(name[len(messages.PREFIX):]) > sent_count):
+            out.append(Check(name, "(보내지 않음)", value, YELLOW,
+                             "이번에 보내지 않은 칸입니다. 이전 값이 남아 인쇄될 수 있습니다"))
+    return out

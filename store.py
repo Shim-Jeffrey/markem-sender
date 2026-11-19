@@ -39,14 +39,17 @@ EVENT_LABEL = {
     "permission_denied": "권한 없음(시도)", "export": "기록 내보내기",
     "work_request": "1차 입력 접수", "work_retry": "2차 불일치(재입력)",
     "work_ok": "작업 성공", "work_fail": "작업 실패", "work_log_error": "작업 기록 오류",
+    "print_control": "인쇄 시작·정지", "app_exit": "프로그램 종료",
 }
 EVENT_GROUPS = {
     "전체": None,
-    "로그인": ("login_ok", "login_fail", "logout", "account_locked", "account_unlocked_auto"),
+    "로그인": ("login_ok", "login_fail", "logout", "account_locked", "account_unlocked_auto",
+            "app_exit"),
     "계정 변경": ("user_created", "user_deleted", "user_activated", "user_deactivated",
               "password_changed", "password_reset", "password_change_fail", "account_unlocked",
               "master_created", "permission_denied", "export"),
-    "작업": ("work_request", "work_retry", "work_ok", "work_fail", "work_log_error"),
+    "작업": ("work_request", "work_retry", "work_ok", "work_fail", "work_log_error",
+           "print_control"),
 }
 _ADMIN_TYPES = EVENT_GROUPS["계정 변경"]
 

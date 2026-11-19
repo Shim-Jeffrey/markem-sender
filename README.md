@@ -8,7 +8,7 @@
 - 장비 없이 시험: `UI_보기_시뮬레이터포함.bat` 더블클릭 (가짜 장비 + 화면). 장비 IP에 `127.0.0.1:21000`
 - 실제 장비: 장비 IP만 입력(포트는 항상 21000). 노트북과 장비 모두 고정 IP, 같은 대역으로 설정
 - 필요: Python 3.13, Pillow (`pip install pillow`)
-- 시험: `python -m unittest discover -s tests` (97개)
+- 시험: `python -m unittest discover -s tests` (111개)
 
 ## 설치 파일
 

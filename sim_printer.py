@@ -50,7 +50,10 @@ def handle(text):
         STATE["batch"] += 1
         return "~PG0|"
     if ident == "~ST":
-        STATE["state"] = f[1] if len(f) > 1 else STATE["state"]
+        want = f[1] if len(f) > 1 else STATE["state"]
+        if want == "06" and STATE["state"] in ("10", "11"):   # 실장비처럼 정지 상태에서 바로 Producing 은 거부
+            return "~ST1|"
+        STATE["state"] = want
         return "~ST0|"
     if ident == "~CR":
         return "~CV0|TOTAL|%09d|BATCH|%09d|TFAIL|000000000|BFAIL|000000000|" % (

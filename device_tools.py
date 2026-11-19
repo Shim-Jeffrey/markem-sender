@@ -95,11 +95,28 @@ def _device_state(xchg, status_on, timeout):
     return f[0] == "1", f[7]
 
 
+READY = "04"           # PackML 상태 코드: Ready(준비). 정지(Held) 뒤에는 Ready 를 거쳐야 다시 Producing 으로 갈 수 있다
+
+
+def _wait_state(xchg, status_on, timeout, tries, pause, sleep, want):
+    """`~DR` 로 상태 코드가 want(코드 모음)에 들어갈 때까지 최대 tries 번 확인한다. 마지막 (생산 여부, 코드)를 돌려준다."""
+    producing, code = False, ""
+    for i in range(tries):
+        producing, code = _device_state(xchg, status_on, timeout)
+        if code in want:
+            break
+        if i < tries - 1:
+            sleep(pause)
+    return producing, code
+
+
 def start_producing(xchg, status_on=True, timeout=10.0, tries=5, pause=1.0, sleep=None):
     """작업 시작: 장비를 Producing(준비·인쇄 대기) 상태로 보낸다(`~ST|06|`) 후 `~DR` 로 확인한다.
 
     (성공 여부, 설명, 신호)를 돌려준다. 통신 오류는 밖으로 던지지 않는다.
-    이미 생산 중이면(생산 플래그와 상태 코드 06 이 모두 맞을 때) 보내지 않고 성공으로 본다. 상태가 바뀌는 데 시간이 걸릴 수 있어 `tries` 번까지 확인한다.
+    이미 생산 중이면(생산 플래그와 상태 코드 06 이 모두 맞을 때) 보내지 않고 성공으로 본다.
+    정지(Held/Holding) 상태이면 먼저 Ready(`~ST|04|`)로 되돌린 뒤 Producing 으로 보낸다
+    (정지 상태에서 바로 06 을 보내면 장비가 거부하기 때문). 상태가 바뀌는 데 시간이 걸릴 수 있어 `tries` 번까지 확인한다.
     """
     import time
     sleep = sleep or time.sleep
@@ -107,17 +124,53 @@ def start_producing(xchg, status_on=True, timeout=10.0, tries=5, pause=1.0, slee
         producing, code = _device_state(xchg, status_on, timeout)
         if producing and code == PRODUCING:
             return True, "이미 작업 중(Producing) 상태입니다", verify.GREEN
+        if code in HELD:      # 정지 상태: Ready 로 먼저 복귀
+            reply = xchg(ngpcl.simple("~ST", "", READY), timeout)
+            if len(reply) < 4 or reply[:3] != "~ST" or reply[3] != "0":
+                return False, "장비가 준비(Ready) 전환을 거부했습니다(응답 %s)" % reply, verify.RED
+            producing, code = _wait_state(xchg, status_on, timeout, tries, pause, sleep, (READY, PRODUCING))
+            if code not in (READY, PRODUCING):
+                name = ngpcl.PACKML_STATE.get(code, code)
+                return False, "정지 상태에서 준비(Ready)로 바뀌지 않았습니다(현재 %s)" % name, verify.YELLOW
+            if producing and code == PRODUCING:
+                return True, "작업 시작됨(Producing)", verify.GREEN
         reply = xchg(ngpcl.simple("~ST", "", PRODUCING), timeout)
         if len(reply) < 4 or reply[:3] != "~ST" or reply[3] != "0":
             return False, "장비가 작업 시작을 거부했습니다(응답 %s)" % reply, verify.RED
+        producing, code = _wait_state(xchg, status_on, timeout, tries, pause, sleep, (PRODUCING,))
+        if producing and code == PRODUCING:
+            return True, "작업 시작됨(Producing)", verify.GREEN
+        name = ngpcl.PACKML_STATE.get(code, code)
+        return False, "작업 시작 명령은 받았지만 상태가 Producing 으로 바뀌지 않았습니다(현재 %s)" % name,             verify.YELLOW
+    except (ToolError, ngpcl.NgpclError) as e:
+        return False, "작업 시작 확인 실패: %s" % e, verify.RED
+
+
+HELD = ("10", "11")      # PackML 상태 코드: 10 Holding(정지 중), 11 Held(정지됨) — 매뉴얼상 SmartDate 가 받는 목표 상태는 Ready·Producing·Held
+STOP_TARGET = "11"
+
+
+def stop_printing(xchg, status_on=True, timeout=10.0, tries=5, pause=1.0, sleep=None):
+    """인쇄 정지: 장비를 Held(정지) 상태로 보낸다(`~ST|11|`) 후 `~DR` 로 확인한다.
+
+    (성공 여부, 설명, 신호)를 돌려준다. 이미 정지(Holding/Held)면 보내지 않는다. 통신 오류는 던지지 않는다.
+    """
+    import time
+    sleep = sleep or time.sleep
+    try:
+        producing, code = _device_state(xchg, status_on, timeout)
+        if code in HELD:
+            return True, "이미 정지 상태입니다", verify.GREEN
+        reply = xchg(ngpcl.simple("~ST", "", STOP_TARGET), timeout)
+        if len(reply) < 4 or reply[:3] != "~ST" or reply[3] != "0":
+            return False, "장비가 정지 명령을 거부했습니다(응답 %s)" % reply, verify.RED
         for i in range(tries):
             producing, code = _device_state(xchg, status_on, timeout)
-            if producing and code == PRODUCING:
-                return True, "작업 시작됨(Producing)", verify.GREEN
+            if code in HELD:
+                return True, "정지됨", verify.GREEN
             if i < tries - 1:
                 sleep(pause)
         name = ngpcl.PACKML_STATE.get(code, code)
-        return False, "작업 시작 명령은 받았지만 상태가 Producing 으로 바뀌지 않았습니다(현재 %s)" % name, \
-            verify.YELLOW
+        return False, "정지 명령은 받았지만 상태가 정지로 바뀌지 않았습니다(현재 %s)" % name, verify.YELLOW
     except (ToolError, ngpcl.NgpclError) as e:
-        return False, "작업 시작 확인 실패: %s" % e, verify.RED
+        return False, "정지 확인 실패: %s" % e, verify.RED

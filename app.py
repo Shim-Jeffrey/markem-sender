@@ -6,6 +6,7 @@
 import datetime
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -17,6 +18,8 @@ import auth_ui
 import confirm_ui
 import device_tools
 import dual
+import job_picker
+import messages
 import ngpcl
 import store
 import verify
@@ -55,6 +58,70 @@ def field(parent, label, row, width=22, value="", show_label=True):
     return e
 
 
+KIOSK = "--window" not in sys.argv    # 기본: 전체 화면 잠금. 개발·시험용으로 `--window` 를 주면 일반 창
+
+
+class ExitDialog(tk.Toplevel):
+    """프로그램 종료 확인: 마스터 계정의 아이디·비밀번호가 맞아야 종료된다."""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.ok = False
+        self.title("프로그램 종료")
+        self.configure(bg=WHITE, padx=24, pady=20)
+        self.transient(app)
+        self.attributes("-topmost", True)
+        self.resizable(False, False)
+        tk.Label(self, text="프로그램을 종료하려면 마스터 계정으로 확인하세요", bg=WHITE, fg=TEXT,
+                 font=(FONT, 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.user = auth_ui._entry(self, "마스터 아이디", 1)
+        self.pw = auth_ui._entry(self, "비밀번호", 2, secret=True)
+        self.msg = tk.Label(self, text="", bg=WHITE, fg=ERR, font=(FONT, 9), anchor="w",
+                            wraplength=320, justify="left")
+        self.msg.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        row = tk.Frame(self, bg=WHITE)
+        row.grid(row=4, column=0, columnspan=2, sticky="we", pady=(10, 0))
+        ttk.Button(row, text="종료", style="Primary.TButton", command=self.submit).pack(side="left")
+        ttk.Button(row, text="취소", style="Ghost.TButton", command=self.destroy).pack(
+            side="left", padx=(8, 0))
+        self.pw.bind("<Return>", lambda e: self.submit())
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_reqwidth()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_reqheight()) // 3
+        self.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+        self.user.focus_force()
+        self.grab_set()
+
+    def submit(self):
+        try:
+            u = self.app.store.login(self.user.get(), self.pw.get())
+        except store.AuthError as e:
+            self.msg.configure(text=str(e))
+            self.pw.delete(0, "end")
+            return
+        if u.role != "master":
+            self.msg.configure(text="마스터 계정만 프로그램을 종료할 수 있습니다")
+            self.pw.delete(0, "end")
+            try:
+                self.app.store.logout(u)
+            except Exception:
+                pass
+            return
+        try:
+            self.app.store.log_event("app_exit", u.username, {})
+        except Exception as e:     # 기록이 남지 않으면 종료하지 않는다
+            self.msg.configure(text="종료 기록을 저장하지 못해 종료하지 않았습니다. 담당자에게 알려 주세요")
+            self.app.log("ERR", "종료 기록 실패: %s" % e)
+            return
+        try:
+            self.app.store.logout(u)
+        except Exception:
+            pass
+        self.ok = True
+        self.destroy()
+
+
 class App(tk.Tk):
     IDLE_SECONDS = 600   # 미사용 10분이면 자동 로그아웃
 
@@ -81,13 +148,69 @@ class App(tk.Tk):
         self.after(30000, self._idle_check)
         self._q = queue.Queue()
         self.after(50, self._drain)
+        self._kiosk_on = False
+        self._exiting = False
+        self.protocol("WM_DELETE_WINDOW", self.request_exit)    # 일반 창 모드에서도 종료 확인
+        if KIOSK:
+            self._kiosk()
         self.start()
+
+    # ---- 전체 화면 잠금: 마스터 비밀번호 없이는 종료·창 전환이 되지 않는다 ----
+    def _kiosk(self):
+        self._kiosk_on = True
+        self.attributes("-fullscreen", True)
+        self.protocol("WM_DELETE_WINDOW", self.request_exit)      # X·Alt+F4 도 종료 확인으로
+        self.bind("<Unmap>", lambda e: self.after(50, self._restore))
+        self.bind("<Escape>", lambda e: "break")
+        self.after(1000, self._keep_front)
+
+    def _restore(self):
+        if self._kiosk_on and not self._exiting and self.state() == "iconic":
+            self.deiconify()
+            self.attributes("-fullscreen", True)
+
+    def _keep_front(self):
+        if not self._exiting:
+            try:
+                if not self.attributes("-fullscreen"):
+                    self.attributes("-fullscreen", True)
+                if self.state() == "iconic":
+                    self.deiconify()
+            except tk.TclError:
+                return
+            self.after(1000, self._keep_front)
+
+    def request_exit(self):
+        """종료 요청: 장비와 통신 중이면 막고, 마스터 확인 뒤에만 닫는다."""
+        if self._exiting:
+            return
+        g = self.grab_current()      # 결과 창 같은 모달이 열려 있으면 그 창을 먼저 닫게 한다(모달이 풀리지 않게)
+        if g is not None:
+            g.lift()
+            g.focus_force()
+            return
+        if self.busy:
+            messagebox.showinfo("처리 중", "장비와 통신 중입니다. 끝난 뒤 종료하세요.", parent=self)
+            return
+        dlg = ExitDialog(self)
+        self.wait_window(dlg)
+        if dlg.ok:
+            self._exiting = True
+            self._expire_pending()      # 대기 중인 1차 요청이 있으면 폐기하고 기록
+            if self.user:
+                try:
+                    self.store.logout(self.user)
+                except Exception:
+                    pass
+            self.destroy()
 
     # 작업 스레드의 결과는 큐로 받아 메인 스레드에서만 화면을 바꾼다(Tk는 스레드에 안전하지 않다)
     def post(self, fn):
         self._q.put(fn)
 
     def _drain(self):
+        # 다음 차례를 먼저 예약한다: 처리 중 결과 창(모달)이 열려도 그 창 안의 작업 결과가 계속 반영된다
+        self.after(50, self._drain)
         try:
             while True:
                 self._q.get_nowait()()
@@ -95,10 +218,11 @@ class App(tk.Tk):
             pass
         except Exception as e:   # 화면 갱신 오류가 앱을 멈추지 않게 한다
             print("화면 갱신 오류:", e)
-        self.after(50, self._drain)
 
     def fit(self, minw, minh):
-        """화면 배율(DPI)에 따라 글자가 커져도 잘리지 않도록 내용 크기에 맞춘다."""
+        """화면 배율(DPI)에 따라 글자가 커져도 잘리지 않도록 내용 크기에 맞춘다(전체 화면에서는 하지 않는다)."""
+        if self._kiosk_on:
+            return
         self.update_idletasks()
         w = min(max(self.winfo_reqwidth(), minw), self.winfo_screenwidth() - 40)
         h = min(max(self.winfo_reqheight() + 10, minh), self.winfo_screenheight() - 90)
@@ -245,8 +369,13 @@ class App(tk.Tk):
         tk.Frame(bar, bg="#3C5C8A", width=1).pack(side="left", fill="y", pady=16)
         tk.Label(bar, text="프린터 데이터 전송", bg=NAVY, fg=WHITE,
                  font=(FONT, 13, "bold")).pack(side="left", padx=14)
-        tk.Label(bar, text="v0.3", bg=NAVY, fg="#9DB2D0", font=(FONT, 9)).pack(
-            side="right", padx=(10, 22))
+        self.exit_btn = tk.Label(bar, text="프로그램 종료", bg=NAVY, fg=WHITE, font=(FONT, 9, "bold"),
+                                 padx=12, pady=5, cursor="hand2", highlightthickness=1,
+                                 highlightbackground="#9DB2D0")
+        self.exit_btn.bind("<Button-1>", lambda e: self.request_exit())
+        self.exit_btn.pack(side="right", padx=(6, 22))
+        tk.Label(bar, text="v0.5", bg=NAVY, fg="#9DB2D0", font=(FONT, 9)).pack(
+            side="right", padx=(10, 0))
         self.logout_btn = tk.Label(bar, text="로그아웃", bg=NAVY, fg=WHITE, font=(FONT, 9, "bold"),
                                    padx=12, pady=5, cursor="hand2", highlightthickness=1,
                                    highlightbackground="#9DB2D0")
@@ -376,7 +505,6 @@ class TtoPage(tk.Frame):
         self._status(left)
         if self.role == "worker":
             self._job(right)
-            self._actions(right)
         else:
             self._note(right)
         self._tools(right)
@@ -543,81 +671,72 @@ class TtoPage(tk.Frame):
             self.st["배치 인쇄"].configure(text=str(int(counts.get("BATCH", "0") or 0)))
         self.app.run(work, done)
 
-    # ---- 작업 ----
+    # ---- 작업·메세지 ----
     def _job(self, parent):
-        c = Card(parent, "작업과 필드 데이터",
-                 "프린터에 보낼 메세지를 적는 곳입니다. 필드이름은 프린터 이미지에 있는 이름과 똑같이 맞춰야 하고(맞춰야 하는 부분), 보내는 메세지는 인쇄할 글자입니다. 작업 이름을 비우면 지금 작업에 적용됩니다.")
+        c = Card(parent, "작업과 보내는 메세지",
+                 "프린터에서 작업을 불러와 선택하고, 인쇄할 메세지를 순서대로 추가하세요. "
+                 "메세지는 1번부터 자동으로 번호가 붙어 프린터의 같은 번호 칸으로 들어갑니다 "
+                 "(필드이름은 직접 입력하지 않습니다).")
         c.pack(fill="both", expand=True)
         g = c.body
-        top = tk.Frame(g, bg=WHITE)
-        top.pack(fill="x")
-        top.columnconfigure(1, weight=1)
-        top.columnconfigure(3, weight=0)
-        tk.Label(top, text="작업 이름", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
-            row=0, column=0, sticky="w", padx=(0, 10))
-        self.job = ttk.Entry(top)
-        self.job.grid(row=0, column=1, sticky="we")
-        tk.Label(top, text="할당 수", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
-            row=0, column=2, sticky="w", padx=(18, 10))
-        self.alloc = ttk.Entry(top, width=10)
-        self.alloc.insert(0, "0")
-        self.alloc.grid(row=0, column=3)
-        tk.Label(top, text="작업 이름이 비면 현재 선택된 작업(단일 헤드)에 적용 · 할당 0 = 제한 없음",
-                 bg=WHITE, fg=MUTED, font=(FONT, 8)).grid(row=1, column=0, columnspan=4,
-                                                       sticky="w", pady=(4, 10))
-        self.tree = ttk.Treeview(g, columns=("name", "value"), show="headings", height=6)
-        self.tree.heading("name", text="필드이름 (맞춰야 하는 부분)")
-        self.tree.heading("value", text="보내는 메세지")
-        self.tree.column("name", width=180)
-        self.tree.column("value", width=300)
-        self.tree.pack(fill="both", expand=True)
+        tk.Label(g, text="① 작업 (프린터에서 불러와 선택)", bg=WHITE, fg=NAVY,
+                 font=(FONT, 9, "bold")).pack(anchor="w")
+        self.picker = job_picker.JobPicker(g, self.app)
+        self.picker.pack(fill="x", pady=(2, 10))
+        tk.Label(g, text="② 보내는 메세지 (추가한 순서대로 메세지 1, 2, 3 …)", bg=WHITE, fg=NAVY,
+                 font=(FONT, 9, "bold")).pack(anchor="w")
+        self._msgs = []          # 메세지 원문은 목록에 보관(표는 표시용: 숫자처럼 보이는 글자가 바뀌지 않게)
+        self.tree = ttk.Treeview(g, columns=("no", "msg"), show="headings", height=6)
+        self.tree.heading("no", text="번호")
+        self.tree.heading("msg", text="보내는 메세지")
+        self.tree.column("no", width=90, anchor="center")
+        self.tree.column("msg", width=420)
+        self.tree.pack(fill="both", expand=True, pady=(2, 0))
         add = tk.Frame(g, bg=WHITE)
         add.pack(fill="x", pady=(10, 0))
         add.columnconfigure(0, weight=1)
-        add.columnconfigure(1, weight=2)
-        tk.Label(add, text="① 필드이름 (맞춰야 하는 부분)", bg=WHITE, fg=NAVY,
-                 font=(FONT, 9, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Label(add, text="② 보내는 메세지 (인쇄할 글자)", bg=WHITE, fg=NAVY,
-                 font=(FONT, 9, "bold")).grid(row=0, column=1, sticky="w")
-        self.f_name = ttk.Entry(add)
         self.f_val = ttk.Entry(add)
-        self.f_name.grid(row=1, column=0, sticky="we", padx=(0, 8))
-        self.f_val.grid(row=1, column=1, sticky="we", padx=(0, 8))
-        self.f_val.bind("<Return>", lambda e: self.add_field())
-        ttk.Button(add, text="추가", style="Ghost.TButton", command=self.add_field).grid(
-            row=1, column=2, padx=(0, 6))
-        ttk.Button(add, text="삭제", style="Ghost.TButton", command=self.del_field).grid(
-            row=1, column=3)
-        self.v_imaged = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g, text="이미징이 끝난 뒤 응답 받기 (권장)",
-                        variable=self.v_imaged).pack(anchor="w", pady=(10, 0))
+        self.f_val.grid(row=0, column=0, sticky="we", padx=(0, 8))
+        self.f_val.bind("<Return>", lambda e: self.add_message())
+        ttk.Button(add, text="추가", style="Ghost.TButton", command=self.add_message).grid(
+            row=0, column=1, padx=(0, 6))
+        ttk.Button(add, text="삭제", style="Ghost.TButton", command=self.del_message).grid(
+            row=0, column=2)
+        ttk.Button(g, text="데이터 전송", style="Primary.TButton",
+                   command=self.request_confirm).pack(anchor="w", pady=(14, 0))
+        tk.Label(g, text="누르면 로그아웃되고, 관리자가 같은 메세지를 입력해 일치할 때만 프린터로 "
+                         "전송됩니다 (10분 이내)", bg=WHITE, fg=MUTED, font=(FONT, 8)).pack(
+            anchor="w", pady=(6, 0))
 
-    def add_field(self):
-        n, v = self.f_name.get().strip(), self.f_val.get()
-        if not n:
-            return
+    def _show_messages(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, m in enumerate(self._msgs, 1):
+            self.tree.insert("", "end", values=(i, m))
+
+    def add_message(self):
+        v = self.f_val.get()
         try:
-            ngpcl.clean(n)
             ngpcl.clean(v)
         except ngpcl.NgpclError as e:
             messagebox.showwarning("입력 확인", str(e))
             return
         if v == "" and not messagebox.askyesno(
-                "값이 비어 있습니다",
-                "필드이름 '%s'의 보내는 메세지가 비어 있습니다.\n\n프린터의 이 필드를 빈 글자로 바꾸게 됩니다.\n"
-                "인쇄할 글자는 ② 보내는 메세지 칸에 입력합니다. 이대로 추가할까요?" % n):
+                "메세지가 비어 있습니다",
+                "보내는 메세지가 비어 있습니다.\n\n프린터의 이 칸을 빈 글자로 바꾸게 됩니다. "
+                "이대로 추가할까요?"):
             return
-        self.tree.insert("", "end", values=(n, v))
-        self.f_name.delete(0, "end")
+        self._msgs.append(v)
+        self._show_messages()
         self.f_val.delete(0, "end")
-        self.f_name.focus_set()
+        self.f_val.focus_set()
 
-    def del_field(self):
-        for i in self.tree.selection():
-            self.tree.delete(i)
+    def del_message(self):
+        for item in sorted((self.tree.index(i) for i in self.tree.selection()), reverse=True):
+            del self._msgs[item]       # 지우면 번호는 다시 1부터 이어진다
+        self._show_messages()
 
     def _fields(self):
-        return [tuple(self.tree.item(i, "values")) for i in self.tree.get_children()]
+        return messages.build_fields(self._msgs)
 
     # ---- 필드·설정 도구 ----
     def _tools(self, parent):
@@ -626,17 +745,12 @@ class TtoPage(tk.Frame):
         c.pack(fill="x", pady=(14, 0))
         g = c.body
         g.columnconfigure(1, weight=1)
-        tk.Label(g, text="필드이름", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
-            row=0, column=0, sticky="w", padx=(0, 10))
-        self.q_field = ttk.Entry(g)
-        self.q_field.grid(row=0, column=1, sticky="we")
-        self.q_field.bind("<Return>", lambda e: self.query_fields())
-        ttk.Button(g, text="필드 조회", style="Ghost.TButton", command=self.query_fields).grid(
-            row=0, column=2, padx=(8, 0))
-        tk.Label(g, text="비우면 현재 작업의 전체 필드", bg=WHITE, fg=MUTED, font=(FONT, 8)).grid(
-            row=1, column=1, sticky="w")
+        ttk.Button(g, text="프린터 메세지 조회", style="Ghost.TButton", command=self.query_fields).grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        tk.Label(g, text="프린터의 현재 작업에 들어 있는 메세지를 번호 순서대로 보여 줍니다", bg=WHITE, fg=MUTED,
+                 font=(FONT, 8)).grid(row=1, column=0, columnspan=3, sticky="w")
         self.q_tree = ttk.Treeview(g, columns=("name", "value"), show="headings", height=3)
-        self.q_tree.heading("name", text="필드이름")
+        self.q_tree.heading("name", text="번호")
         self.q_tree.heading("value", text="프린터에 들어 있는 메세지")
         self.q_tree.column("name", width=170)
         self.q_tree.column("value", width=300)
@@ -691,20 +805,20 @@ class TtoPage(tk.Frame):
     def query_fields(self):
         if not self._ready():
             return
-        name, on = self.q_field.get().strip(), self.client.status_on
+        on = self.client.status_on
         x = self._xchg()
 
         def work():
-            return device_tools.query_fields(x, "", name, on)
+            return device_tools.query_fields(x, "", "", on)
 
         def done(rows):
             self.q_tree.delete(*self.q_tree.get_children())
             for n, v in rows:
-                self.q_tree.insert("", "end", values=(n, v))
+                self.q_tree.insert("", "end", values=(messages.friendly(n), v))
             if rows:
-                self._tool_result("필드 %d개를 조회했습니다" % len(rows), verify.GREEN)
+                self._tool_result("메세지 %d개를 조회했습니다" % len(rows), verify.GREEN)
             else:
-                self._tool_result("장비에서 필드를 찾지 못했습니다(이름·현재 작업 확인)", verify.YELLOW)
+                self._tool_result("프린터에서 메세지를 찾지 못했습니다(현재 작업 확인)", verify.YELLOW)
         self.app.run(self._guard(work), done)
 
     def query_setting(self):
@@ -741,7 +855,7 @@ class TtoPage(tk.Frame):
         except dual.DualError as e:
             messagebox.showwarning("입력 확인", str(e))
             return
-        self.request_confirm("setting", req)
+        self.request_confirm(req)
 
     # ---- 전송 ----
     def _note(self, parent):
@@ -764,24 +878,7 @@ class TtoPage(tk.Frame):
                                   "작업자가 입력을 마치면 여기서 2차 확인 입력을 할 수 있습니다.",
                      bg=WHITE, fg=MUTED, font=(FONT, 10), justify="left", anchor="w").pack(fill="x")
 
-    def _actions(self, parent):
-        c = Card(parent, "관리자 확인 요청",
-                 "작업 선택=작업을 바꿈 · 필드 갱신=글자만 바꿈 · 갱신 후 인쇄=글자를 바꾸고 인쇄 · 인쇄 신호=지금 한 번 인쇄. 누르면 관리자가 같은 값을 입력해 확인합니다. 글자 데이터가 있는 요청은 전송·확인이 끝나면 프린터가 자동으로 작업 시작(인쇄 대기) 상태가 됩니다.")
-        c.pack(fill="x", pady=(14, 0))
-        g = c.body
-        row = tk.Frame(g, bg=WHITE)
-        row.pack(fill="x")
-        for text, kind in (("작업 선택", "select"), ("필드 갱신", "update"),
-                           ("갱신 후 인쇄", "update_print")):
-            ttk.Button(row, text=text, style="Primary.TButton",
-                       command=lambda k=kind: self.request_confirm(k)).pack(side="left", padx=(0, 8))
-        ttk.Button(row, text="인쇄 신호", style="Ghost.TButton",
-                   command=self.print_go).pack(side="left", padx=(10, 0))
-        tk.Label(g, text="입력을 마치고 요청하면 로그아웃되고, 2차 관리자가 같은 내용을 입력해 일치할 때만 "
-                         "장비로 전송됩니다 (10분 이내)",
-                 bg=WHITE, fg=MUTED, font=(FONT, 8)).pack(anchor="w", pady=(8, 0))
-
-    def request_confirm(self, kind, req=None):
+    def request_confirm(self, req=None):
         app = self.app
         if not self._ready():
             return
@@ -789,12 +886,21 @@ class TtoPage(tk.Frame):
             messagebox.showinfo("처리 중", "장비와 통신 중입니다. 끝난 뒤 다시 요청하세요.")
             return
         if req is None:
+            job = self.picker.get()
+            if not job:
+                messagebox.showinfo("작업 선택", "먼저 [프린터에서 불러오기]로 작업을 선택하세요.")
+                return
+            if not self._msgs:
+                messagebox.showinfo("보내는 메세지", "보내는 메세지를 한 개 이상 추가하세요.")
+                return
+            # 프린터의 현재 작업이면 메세지만 갱신, 다른 작업이면 작업을 선택하며 보낸다
+            kind = "update" if job == self.picker.current else "select"
             try:
-                req = dual.Request(kind, self.job.get(), self.alloc.get(), self._fields(),
-                                   self.v_imaged.get())
+                req = dual.Request(kind, job, "0", self._fields(), True)
             except dual.DualError as e:
                 messagebox.showwarning("입력 확인", str(e))
                 return
+        kind = req.kind
         old = app.dual.submit(app.user, req)
         if old:   # 이전 요청이 확인 없이 새 요청으로 바뀐 경우
             try:
@@ -807,22 +913,6 @@ class TtoPage(tk.Frame):
         messagebox.showinfo("1차 입력 완료", "입력을 접수했습니다.\n2차 관리자가 로그인해 같은 내용을 "
                                         "입력하면 전송됩니다 (10분 이내).")
         app.logout("1차 입력이 접수되었습니다. 2차 관리자가 로그인해 같은 내용을 입력하세요 (10분 이내)")
-
-    def _result(self, what, reply):
-        if self._ok(reply):
-            self.app.log("INFO", "%s 성공" % what)
-            self.refresh_soft()
-        else:
-            self.app.log("ERR", "%s 실패 — 응답 %s" % (what, reply))
-
-    def refresh_soft(self):
-        self.after(50, self.refresh)
-
-    def print_go(self):
-        if not self._ready():
-            return
-        self.app.run(lambda: self._x(ngpcl.print_go("", 0, 1), 10.0),
-                     lambda r: self._result("인쇄 신호", r))
 
 
 def _single_instance():

@@ -164,6 +164,30 @@ class StartProducingTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(sent, ["~DR|", "~ST|06|", "~DR|"])
 
+    def test_restart_after_stop_goes_through_ready(self):
+        # 정지(Held 11) 상태에서는 먼저 Ready(04)로 되돌린 뒤 Producing(06)
+        (ok, note, light), sent = self.run_seq(
+            [ds(0, "11"), "~ST0|", ds(0, "04"), "~ST0|", ds(1, "06")])
+        self.assertEqual((ok, light), (True, V.GREEN))
+        self.assertEqual(sent, ["~DR|", "~ST|04|", "~DR|", "~ST|06|", "~DR|"])
+
+    def test_restart_waits_for_ready(self):
+        (ok, note, light), sent = self.run_seq(
+            [ds(0, "10"), "~ST0|", ds(0, "10"), ds(0, "04"), "~ST0|", ds(1, "06")])
+        self.assertTrue(ok)
+        self.assertEqual(sent.count("~ST|04|"), 1)
+
+    def test_ready_rejected_is_red(self):
+        (ok, note, light), sent = self.run_seq([ds(0, "11"), "~ST1|"])
+        self.assertEqual((ok, light), (False, V.RED))
+        self.assertNotIn("~ST|06|", sent)
+
+    def test_never_ready_is_yellow_and_no_start_sent(self):
+        (ok, note, light), sent = self.run_seq(
+            [ds(0, "11"), "~ST0|", ds(0, "11"), ds(0, "11"), ds(0, "11")])
+        self.assertEqual((ok, light), (False, V.YELLOW))
+        self.assertNotIn("~ST|06|", sent)
+
     def test_rejected_is_red(self):
         (ok, note, light), sent = self.run_seq([ds(0, "04"), "~ST1|"])
         self.assertEqual((ok, light), (False, V.RED))

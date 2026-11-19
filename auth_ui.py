@@ -42,23 +42,114 @@ class AuthBox(tk.Frame):
         self.msg.configure(text=text)
 
 
-class LoginFrame(AuthBox):
-    def __init__(self, parent, app, notice=""):
-        super().__init__(parent, "로그인", notice)
-        self.app = app
-        r = 1 if notice else 0
-        self.user = _entry(self.form, "아이디", r)
-        self.pw = _entry(self.form, "비밀번호", r + 1, secret=True)
-        self.finish(r + 2, "로그인", self.submit, self.user, self.pw)
+class LoginDialog(tk.Toplevel):
+    """로그인 팝업. 성공하면 '로그인 완료'를 보여 준 뒤 스르르 사라진다.
+
+    모든 역할 동일: 3, 2, 1 카운트다운 뒤 사라짐.
+    """
+    COUNT_ROLES = ("worker", "manager", "master")      # 모든 역할 동일: 3·2·1 뒤 스르르 닫힘
+
+    def __init__(self, frame, app, notice=""):
+        super().__init__(app)
+        self.frame, self.app = frame, app
+        self.done = False
+        self.title("로그인")
+        self.configure(bg=WHITE, padx=28, pady=22)
+        self.transient(app)
+        self.attributes("-topmost", True)
+        self.resizable(False, False)
+        tk.Label(self, text="로그인", bg=WHITE, fg=NAVY, font=(FONT, 14, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        if notice:
+            tk.Label(self, text=notice, bg=WHITE, fg=MUTED, font=(FONT, 9), justify="left",
+                     wraplength=340).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.user = _entry(self, "아이디", 2, width=26)
+        self.pw = _entry(self, "비밀번호", 3, secret=True, width=26)
+        self.msg = tk.Label(self, text="", bg=WHITE, fg=ERR, font=(FONT, 9), anchor="w",
+                            wraplength=340, justify="left")
+        self.msg.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.btn = ttk.Button(self, text="로그인", style="Primary.TButton", command=self.submit)
+        self.btn.grid(row=5, column=0, columnspan=2, sticky="we", pady=(10, 0))
+        self.pw.bind("<Return>", lambda e: self.submit())
+        self.user.bind("<Return>", lambda e: self.pw.focus_set())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)     # 닫으면 바탕의 [로그인] 버튼으로 다시 연다
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = app.winfo_rootx() + (app.winfo_width() - w) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - h) // 2.4
+        self.geometry("+%d+%d" % (max(int(x), 0), max(int(y), 0)))
+        self.user.focus_force()
 
     def submit(self):
+        if self.done:
+            return
         try:
             u = self.app.store.login(self.user.get(), self.pw.get())
         except S.AuthError as e:
             self.pw.delete(0, "end")
-            self.error(str(e))
+            self.msg.configure(text=str(e), fg=ERR)
             return
-        self.app.after_login(u)
+        self.done = True
+        for w in (self.user, self.pw, self.btn):
+            w.configure(state="disabled")
+        self.msg.configure(fg=NAVY, font=(FONT, 11, "bold"),
+                           text="%s님, 로그인되었습니다" % u.display_name)
+        if u.role in self.COUNT_ROLES:
+            self._count(u, 3)
+        else:
+            self.after(400, lambda: self._fade(u, 1.0))
+
+    def _count(self, u, n):
+        if not self.winfo_exists():
+            return
+        if n <= 0:
+            self._fade(u, 1.0)
+            return
+        self.msg.configure(text="%s님, 로그인되었습니다  ·  %d" % (u.display_name, n))
+        self.after(1000, lambda: self._count(u, n - 1))
+
+    def _fade(self, u, a):
+        if not self.winfo_exists():
+            return
+        if a <= 0.05:
+            self.destroy()
+            self.app.after_login(u)
+            return
+        try:
+            self.attributes("-alpha", a)
+        except tk.TclError:
+            a = 0
+        self.after(30, lambda: self._fade(u, a - 0.07))
+
+
+class LoginFrame(tk.Frame):
+    """로그인 바탕 화면: 로그인 팝업을 자동으로 띄우고, 닫았을 때는 [로그인] 버튼으로 다시 연다."""
+
+    def __init__(self, parent, app, notice=""):
+        super().__init__(parent, bg=BG)
+        self.app, self.notice = app, notice
+        box = tk.Frame(self, bg=BG)
+        box.place(relx=0.5, rely=0.42, anchor="center")
+        tk.Label(box, text="프린터 데이터 전송", bg=BG, fg=NAVY, font=(FONT, 20, "bold")).pack()
+        tk.Label(box, text="로그인 후 사용할 수 있습니다", bg=BG, fg=MUTED, font=(FONT, 11)).pack(
+            pady=(6, 16))
+        ttk.Button(box, text="로그인", style="Primary.TButton", command=self.open).pack()
+        self.dlg = None
+        self.after(200, self.open)
+
+    def open(self):
+        if self.dlg is not None and self.dlg.winfo_exists():
+            self.dlg.lift()
+            self.dlg.focus_force()
+            return
+        if not self.winfo_exists():
+            return
+        self.dlg = LoginDialog(self, self.app, self.notice)
+
+    def destroy(self):
+        if self.dlg is not None and self.dlg.winfo_exists() and not self.dlg.done:
+            self.dlg.destroy()
+        super().destroy()
 
 
 class SetupFrame(AuthBox):
